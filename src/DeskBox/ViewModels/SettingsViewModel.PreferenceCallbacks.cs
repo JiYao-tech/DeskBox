@@ -145,6 +145,30 @@ public partial class SettingsViewModel
         }
     }
 
+    partial void OnWidgetSnapGridSizeChanged(double value)
+    {
+        double normalized = SettingsService.NormalizeWidgetSnapGridSize(value);
+        if (!double.IsFinite(value) || Math.Abs(value - normalized) > 0.0001)
+        {
+            WidgetSnapGridSize = normalized;
+            return;
+        }
+
+        OnPropertyChanged(nameof(WidgetSnapGridSizeText));
+
+        if (_isRestoringDefaults)
+        {
+            return;
+        }
+
+        _settingsService.Settings.WidgetSnapGridSize = normalized;
+        _settingsService.SaveDebounced();
+        if (App.Current is { } app)
+        {
+            app.ResizeGuideOverlay.SnapGridSizeDips = normalized;
+        }
+    }
+
     partial void OnKeepWidgetsVisibleOnShowDesktopChanged(bool value)
     {
         OnPropertyChanged(nameof(SelectedShowDesktopBehavior));

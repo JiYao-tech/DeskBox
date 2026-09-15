@@ -791,6 +791,8 @@
     "Settings.ResizeSnap.Description": "Beim Verschieben oder Ändern der Größe einrasten; mit Strg und Ziehen am Titel alle Widgets auf dem aktuellen Bildschirm gemeinsam verschieben",
     "Settings.WidgetSnap.Spacing.Title": "Widget-Abstand",
     "Settings.WidgetSnap.Spacing.Description": "Abstand zwischen benachbarten Widgets nach dem Einrasten (px)",
+    "Settings.WidgetSnap.GridSize.Title": "Einrastraster",
+    "Settings.WidgetSnap.GridSize.Description": "Widget-Größe beim Ändern auf Vielfache dieses Rasters runden, damit alle Zellen gleich groß bleiben (px, 0 = aus)",
     "Settings.HideShortcutArrow.Title": "Verknüpfungspfeil-Overlay ausblenden",
     "Settings.HideShortcutArrow.Description": "Betrifft nur Symbole innerhalb von DeskBox-Widgets",
     "Settings.ShowHoverButtons.Title": "Hover-Buttons anzeigen",

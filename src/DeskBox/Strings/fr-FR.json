@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "Alignez pendant le déplacement ou le redimensionnement ; maintenez Ctrl et faites glisser un titre pour déplacer tous les widgets de l'écran actuel",
   "Settings.WidgetSnap.Spacing.Title": "Espacement des widgets",
   "Settings.WidgetSnap.Spacing.Description": "Écart conservé entre les widgets adjacents après l'alignement (px)",
+  "Settings.WidgetSnap.GridSize.Title": "Grille d'alignement",
+  "Settings.WidgetSnap.GridSize.Description": "Arrondit la taille du widget aux multiples de cette grille lors du redimensionnement pour garder des cellules de même taille (px, 0 désactive)",
   "Settings.HideShortcutArrow.Title": "Masquer la superposition des flèches de raccourci",
   "Settings.HideShortcutArrow.Description": "Affecte uniquement les icônes affichées dans les widgets DeskBox",
   "Settings.ShowHoverButtons.Title": "Afficher les boutons en haut à droite",

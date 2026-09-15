@@ -1697,6 +1697,27 @@ svc:Localized.DescriptionKey="Settings.DefaultWidth.Description"
                                             Value="{Binding WidgetSnapSpacing, Mode=TwoWay}" />
                                     </StackPanel>
                                 </toolkit:SettingsCard>
+                                <toolkit:SettingsCard
+                                    HorizontalContentAlignment="Right"
+                                    IsEnabled="{Binding ResizeSnapEnabled}"
+                                    svc:Localized.DescriptionKey="Settings.WidgetSnap.GridSize.Description"
+                                    svc:Localized.HeaderKey="Settings.WidgetSnap.GridSize.Title">
+                                    <StackPanel
+                                        VerticalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                        <TextBlock
+                                            Style="{StaticResource SliderSettingValueTextStyle}"
+                                            Text="{Binding WidgetSnapGridSizeText}" />
+                                        <Slider
+                                            Width="240"
+                                            Maximum="64"
+                                            Minimum="0"
+                                            StepFrequency="1"
+                                            Style="{StaticResource InlineMetricSliderStyle}"
+                                            Value="{Binding WidgetSnapGridSize, Mode=TwoWay}" />
+                                    </StackPanel>
+                                </toolkit:SettingsCard>
                             </toolkit:SettingsExpander.Items>
                         </toolkit:SettingsExpander>
                         <toolkit:SettingsCard

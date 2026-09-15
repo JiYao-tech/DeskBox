@@ -152,6 +152,72 @@ public sealed class WidgetSnapCalculatorTests
         Assert.True(snap.UsesSpacing);
     }
 
+    [Fact]
+    public void GridSnap_RoundsEveryDraggedEdgeToTheNearestMultiple()
+    {
+        RectInt32 snapped = WidgetSnapCalculator.SnapResizeToGrid(
+            new RectInt32(100, 200, 253, 187),
+            "BottomRight",
+            gridSize: 10);
+
+        Assert.Equal(new RectInt32(100, 200, 250, 190), snapped);
+    }
+
+    [Fact]
+    public void GridSnap_KeepsTheOppositeEdgePinnedForLeftAndTopResizes()
+    {
+        RectInt32 snapped = WidgetSnapCalculator.SnapResizeToGrid(
+            new RectInt32(100, 200, 253, 187),
+            "TopLeft",
+            gridSize: 8);
+
+        Assert.Equal(353, snapped.X + snapped.Width);
+        Assert.Equal(387, snapped.Y + snapped.Height);
+        Assert.Equal(256, snapped.Width);
+        Assert.Equal(184, snapped.Height);
+        Assert.Equal(97, snapped.X);
+        Assert.Equal(203, snapped.Y);
+    }
+
+    [Fact]
+    public void GridSnap_LeavesTheUntouchedAxisAlone()
+    {
+        var proposed = new RectInt32(10, 20, 253, 187);
+
+        RectInt32 horizontal = WidgetSnapCalculator.SnapResizeToGrid(
+            proposed,
+            "Right",
+            gridSize: 16);
+        RectInt32 vertical = WidgetSnapCalculator.SnapResizeToGrid(
+            proposed,
+            "Bottom",
+            gridSize: 16);
+
+        Assert.Equal(new RectInt32(10, 20, 256, 187), horizontal);
+        Assert.Equal(new RectInt32(10, 20, 253, 192), vertical);
+    }
+
+    [Fact]
+    public void GridSnap_KeepsASingleStepForSizesBelowOneStep()
+    {
+        RectInt32 snapped = WidgetSnapCalculator.SnapResizeToGrid(
+            new RectInt32(5, 5, 3, 1),
+            "BottomRight",
+            gridSize: 10);
+
+        Assert.Equal(10, snapped.Width);
+        Assert.Equal(10, snapped.Height);
+    }
+
+    [Fact]
+    public void GridSnap_IsDisabledForZeroOrNegativeGridSizes()
+    {
+        var proposed = new RectInt32(10, 20, 253, 187);
+
+        Assert.Equal(proposed, WidgetSnapCalculator.SnapResizeToGrid(proposed, "BottomRight", 0));
+        Assert.Equal(proposed, WidgetSnapCalculator.SnapResizeToGrid(proposed, "BottomRight", -8));
+    }
+
     private static WidgetMoveSnapResult ResolveMove(RectInt32 proposedBounds) =>
         WidgetSnapCalculator.ResolveMove(
             proposedBounds,

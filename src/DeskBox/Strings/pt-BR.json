@@ -791,6 +791,8 @@
     "Settings.ResizeSnap.Description": "Encaixe ao mover ou redimensionar; segure Ctrl e arraste um título para mover todos os Widgets da tela atual",
     "Settings.WidgetSnap.Spacing.Title": "Espaçamento dos Widgets",
     "Settings.WidgetSnap.Spacing.Description": "Intervalo mantido entre Widgets adjacentes após o encaixe (px)",
+    "Settings.WidgetSnap.GridSize.Title": "Grade de encaixe",
+    "Settings.WidgetSnap.GridSize.Description": "Arredonda o tamanho do Widget para múltiplos desta grade ao redimensionar, mantendo as células uniformes (px, 0 desativa)",
     "Settings.HideShortcutArrow.Title": "Ocultar sobreposição de seta de atalho",
     "Settings.HideShortcutArrow.Description": "Afeta apenas os ícones mostrados dentro dos Widgets do DeskBox",
     "Settings.ShowHoverButtons.Title": "Mostrar botões de Hover",

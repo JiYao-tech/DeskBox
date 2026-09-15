@@ -941,6 +941,7 @@ public partial class App : Application
             // Sync widget move/resize snap settings.
             ResizeGuideOverlay.IsSnapEnabled = SettingsService.Settings.ResizeSnapEnabled;
             ResizeGuideOverlay.SnapSpacingDips = SettingsService.Settings.WidgetSnapSpacing;
+            ResizeGuideOverlay.SnapGridSizeDips = SettingsService.Settings.WidgetSnapGridSize;
 
             // Phase 2: Initialize services that depend on settings (parallel)
             ThemeService = Services.GetRequiredService<ThemeService>();

@@ -207,6 +207,7 @@ private string[]? _cachedWeatherRefreshIntervalDisplayNames;
     [ObservableProperty] public partial bool ShowHoverButtons { get; set; } = true;
     [ObservableProperty] public partial bool ResizeSnapEnabled { get; set; } = true;
     [ObservableProperty] public partial double WidgetSnapSpacing { get; set; } = SettingsService.DefaultWidgetSnapSpacing;
+    [ObservableProperty] public partial double WidgetSnapGridSize { get; set; } = SettingsService.DefaultWidgetSnapGridSize;
     [ObservableProperty] public partial bool KeepWidgetsVisibleOnShowDesktop { get; set; } = true;
     [ObservableProperty] public partial bool ShowHoverActionLockPosition { get; set; }
     [ObservableProperty] public partial bool ShowHoverActionLockSize { get; set; }
@@ -318,6 +319,7 @@ private string[]? _cachedWeatherRefreshIntervalDisplayNames;
         ShowHoverButtons = settings.ShowHoverButtons;
         ResizeSnapEnabled = settings.ResizeSnapEnabled;
         WidgetSnapSpacing = SettingsService.NormalizeWidgetSnapSpacing(settings.WidgetSnapSpacing);
+        WidgetSnapGridSize = SettingsService.NormalizeWidgetSnapGridSize(settings.WidgetSnapGridSize);
         KeepWidgetsVisibleOnShowDesktop = settings.KeepWidgetsVisibleOnShowDesktop;
         ApplyHoverButtonActionSelection(settings.WidgetHoverButtonActions);
         ShowListItemDetails = settings.ShowListItemDetails;

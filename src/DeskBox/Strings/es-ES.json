@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "Ajuste al mover o cambiar el tamaño; mantenga Ctrl y arrastre un título para mover todos los widgets de la pantalla actual",
   "Settings.WidgetSnap.Spacing.Title": "Espaciado de widgets",
   "Settings.WidgetSnap.Spacing.Description": "Separación entre widgets adyacentes después del ajuste (px)",
+  "Settings.WidgetSnap.GridSize.Title": "Cuadrícula de ajuste",
+  "Settings.WidgetSnap.GridSize.Description": "Redondea el tamaño del widget a múltiplos de esta cuadrícula al cambiar el tamaño para que todas las celdas sean iguales (px, 0 lo desactiva)",
   "Settings.HideShortcutArrow.Title": "Ocultar superposición de flechas de acceso directo",
   "Settings.HideShortcutArrow.Description": "Sólo afecta a los iconos que se muestran dentro de los widgets de DeskBox",
   "Settings.ShowHoverButtons.Title": "Mostrar botones arriba a la derecha",

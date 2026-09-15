@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "সরানো বা আকার বদলানোর সময় স্ন্যাপ করুন; বর্তমান পর্দার সব উইজেট একসাথে সরাতে Ctrl ধরে শিরোনাম টানুন",
   "Settings.WidgetSnap.Spacing.Title": "উইজেট ব্যবধান",
   "Settings.WidgetSnap.Spacing.Description": "স্ন্যাপ করার পর পাশাপাশি উইজেটের মধ্যে রাখা ফাঁক (px)",
+  "Settings.WidgetSnap.GridSize.Title": "স্ন্যাপ গ্রিড",
+  "Settings.WidgetSnap.GridSize.Description": "আকার পরিবর্তনের সময় উইজেটের আকার এই গ্রিডের গুণিতকে রাউন্ড করুন, যাতে সব ঘরের আকার একই থাকে (px, 0 বন্ধ করে)",
   "Settings.HideShortcutArrow.Title": "শর্টকাট তীর ওভারলে লুকান",
   "Settings.HideShortcutArrow.Description": "শুধুমাত্র ডেস্কবক্স উইজেটগুলির মধ্যে দেখানো আইকনগুলিকে প্রভাবিত করে৷",
   "Settings.ShowHoverButtons.Title": "উপরের-ডান বোতামগুলি দেখান",
