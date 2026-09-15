@@ -791,6 +791,8 @@
     "Settings.ResizeSnap.Description": "移動またはサイズ変更時にスナップします。Ctrl を押しながらタイトルをドラッグすると、現在の画面上の全ウィジェットをまとめて移動できます",
     "Settings.WidgetSnap.Spacing.Title": "ウィジェット間隔",
     "Settings.WidgetSnap.Spacing.Description": "スナップ後に隣接するウィジェット間へ保持する間隔（px）",
+    "Settings.WidgetSnap.GridSize.Title": "スナップグリッド",
+    "Settings.WidgetSnap.GridSize.Description": "サイズ変更時にウィジェットのサイズをこのグリッドの倍数に揃え、格子の大きさを統一します（px、0 で無効）",
     "Settings.HideShortcutArrow.Title": "ショートカット矢印オーバーレイを非表示",
     "Settings.HideShortcutArrow.Description": "DeskBox ウィジェット内に表示されるアイコンにのみ影響します",
     "Settings.ShowHoverButtons.Title": "ホバーボタンを表示",

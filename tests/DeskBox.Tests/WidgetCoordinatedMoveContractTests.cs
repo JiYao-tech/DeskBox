@@ -60,6 +60,71 @@ public sealed class WidgetCoordinatedMoveContractTests
         Assert.DoesNotContain("<NumberBox", card, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void WidgetSnapGridSizeSetting_UsesSliderInsteadOfNumberBox()
+    {
+        string settingsXaml = Read("src/DeskBox/Views/SettingsWindow.xaml");
+        int start = settingsXaml.IndexOf(
+            "Settings.WidgetSnap.GridSize.Title",
+            StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        int end = settingsXaml.IndexOf(
+            "</toolkit:SettingsCard>",
+            start,
+            StringComparison.Ordinal);
+        Assert.True(end > start);
+        string card = settingsXaml[start..end];
+
+        Assert.Contains("<Slider", card, StringComparison.Ordinal);
+        Assert.Contains("StepFrequency=\"1\"", card, StringComparison.Ordinal);
+        Assert.Contains("WidgetSnapGridSizeText", card, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{Binding WidgetSnapGridSize, Mode=TwoWay}\"", card, StringComparison.Ordinal);
+        Assert.DoesNotContain("<NumberBox", card, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WidgetSnapGridSizeSetting_LivesInTheWidgetSnappingExpanderAndReachesTheLiveOverlay()
+    {
+        string settingsXaml = Read("src/DeskBox/Views/SettingsWindow.xaml");
+        int snapExpander = settingsXaml.IndexOf(
+            "svc:Localized.HeaderKey=\"Settings.ResizeSnap.Title\"",
+            StringComparison.Ordinal);
+        int spacingCard = settingsXaml.IndexOf(
+            "Settings.WidgetSnap.Spacing.Title",
+            StringComparison.Ordinal);
+        int gridCard = settingsXaml.IndexOf(
+            "Settings.WidgetSnap.GridSize.Title",
+            StringComparison.Ordinal);
+        int doubleClickCard = settingsXaml.IndexOf(
+            "Settings.DesktopDoubleClick.Title",
+            StringComparison.Ordinal);
+
+        Assert.True(snapExpander >= 0);
+        Assert.True(snapExpander < spacingCard);
+        Assert.True(spacingCard < gridCard);
+        Assert.True(gridCard < doubleClickCard);
+
+        string overlay = Read("src/DeskBox/Services/ResizeGuideOverlayService.cs");
+        Assert.Contains(
+            "public double SnapGridSizeDips { get; set; }",
+            overlay,
+            StringComparison.Ordinal);
+        Assert.Contains("SnapResizeToGrid(", overlay, StringComparison.Ordinal);
+        Assert.Contains(
+            "NormalizeWidgetSnapGridSize(SnapGridSizeDips)",
+            overlay,
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            "ResizeGuideOverlay.SnapGridSizeDips = SettingsService.Settings.WidgetSnapGridSize;",
+            Read("src/DeskBox/App.xaml.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "app.ResizeGuideOverlay.SnapGridSizeDips = normalized;",
+            Read("src/DeskBox/ViewModels/SettingsViewModel.PreferenceCallbacks.cs"),
+            StringComparison.Ordinal);
+    }
+
     private static string Read(string relativePath) =>
         File.ReadAllText(TestPaths.FromRepository(relativePath));
 }

@@ -20,7 +20,7 @@ $auditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 # scripts/start-aot-preview.ps1 and the lowercase requiredAuditProfileVersion
 # chain in the run-aot-*-smoke.ps1 runners, and update every contract test
 # pinning "= <previous version>" (grep: auditProfileVersion).
-$auditProfileVersion = 62
+$auditProfileVersion = 63
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $project = Join-Path $repoRoot "src\DeskBox\DeskBox.csproj"
@@ -2074,7 +2074,7 @@ $stage5AMissingDataPathPatterns = @(
     }
 )
 $stage5ARequiredLauncherPatterns = @(
-    '$RequiredAuditProfileVersion = 62',
+    '$RequiredAuditProfileVersion = 63',
     '$RequiredSummarySchemaVersion = 55',
     'Test-PathEqualOrInside',
     'Get-DirectoryStateFingerprint',
@@ -3617,7 +3617,7 @@ $stage5B4B1MissingBindableTypePatterns = @(
         }
     }
 )
-$stage5B4B1ExpectedBindableViewModelPropertyCount = 327
+$stage5B4B1ExpectedBindableViewModelPropertyCount = 329
 $stage5B4B1ActualBindableViewModelPropertyCount = [regex]::Matches(
     $stage5B4B1Sources[$stage5B4B1SourceFiles[9]],
     [regex]::Escape('nameof(')).Count
@@ -7966,7 +7966,7 @@ $stage5B4C3B2B1RunnerSource =
 $stage5B4C3B2B1RequiredSmokeScriptPatterns = @(
     'TodoNotificationEnvelopeForwarding',
     'run-aot-todo-notification-forwarding-smoke.ps1',
-    '$requiredAuditProfileVersion = 62',
+    '$requiredAuditProfileVersion = 63',
     '$requiredSummarySchemaVersion = 55',
     '-NoStop',
     '-ExpectExistingInstance',
@@ -8136,7 +8136,7 @@ $stage5B4C3B2B2ARunnerSource =
 $stage5B4C3B2B2ARequiredSmokeScriptPatterns = @(
     'TodoNotificationSurfaceRouting',
     'run-aot-todo-notification-surface-smoke.ps1',
-    '$requiredAuditProfileVersion = 62',
+    '$requiredAuditProfileVersion = 63',
     '$requiredSummarySchemaVersion = 55',
     '-AllowEarlyExit',
     '-StartupWaitSeconds 1',
@@ -8306,7 +8306,7 @@ $stage5B4C3B2B2BRunnerSource =
     $stage5B4C3B2B2BSources[$stage5B4C3B2B2BSourceFiles[10]]
 $stage5B4C3B2B2BRequiredSmokeScriptPatterns = @(
     'RealWindowsNotificationUserClick',
-    '$requiredAuditProfileVersion = 62',
+    '$requiredAuditProfileVersion = 63',
     '$requiredSummarySchemaVersion = 55',
     '[switch]$IncludeColdStart',
     '-AllowEarlyExit',

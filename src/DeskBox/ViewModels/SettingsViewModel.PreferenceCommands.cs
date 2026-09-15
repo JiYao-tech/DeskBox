@@ -68,6 +68,8 @@ public partial class SettingsViewModel
             if (App.Current is { } app)
             {
                 app.ResizeGuideOverlay.IsSnapEnabled = _settingsService.Settings.ResizeSnapEnabled;
+                app.ResizeGuideOverlay.SnapSpacingDips = _settingsService.Settings.WidgetSnapSpacing;
+                app.ResizeGuideOverlay.SnapGridSizeDips = _settingsService.Settings.WidgetSnapGridSize;
             }
 
             App.Current?.GlobalHotkeyService?.RefreshRegistration();

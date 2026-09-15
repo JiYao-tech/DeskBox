@@ -84,6 +84,59 @@ internal static class WidgetSnapCalculator
             vertical);
     }
 
+    /// <summary>
+    /// Rounds the dimension that <paramref name="resizeDirection"/> is changing
+    /// to the nearest multiple of <paramref name="gridSize"/>, so repeated
+    /// manual resizes produce cells of a uniform size.  The edge opposite to
+    /// the dragged one stays pinned, exactly like a plain resize.  A
+    /// <paramref name="gridSize"/> of zero or less disables the grid and
+    /// returns the proposed bounds unchanged.
+    /// </summary>
+    public static RectInt32 SnapResizeToGrid(
+        RectInt32 proposedBounds,
+        string resizeDirection,
+        int gridSize)
+    {
+        if (gridSize <= 0)
+        {
+            return proposedBounds;
+        }
+
+        int width = proposedBounds.Width;
+        int height = proposedBounds.Height;
+        bool resizesHorizontally =
+            resizeDirection.Contains("Left", StringComparison.Ordinal) ||
+            resizeDirection.Contains("Right", StringComparison.Ordinal);
+        bool resizesVertically =
+            resizeDirection.Contains("Top", StringComparison.Ordinal) ||
+            resizeDirection.Contains("Bottom", StringComparison.Ordinal);
+
+        if (resizesHorizontally)
+        {
+            width = RoundToGrid(width, gridSize);
+        }
+
+        if (resizesVertically)
+        {
+            height = RoundToGrid(height, gridSize);
+        }
+
+        int x = resizeDirection.Contains("Left", StringComparison.Ordinal)
+            ? proposedBounds.X + proposedBounds.Width - width
+            : proposedBounds.X;
+        int y = resizeDirection.Contains("Top", StringComparison.Ordinal)
+            ? proposedBounds.Y + proposedBounds.Height - height
+            : proposedBounds.Y;
+
+        return new RectInt32(x, y, width, height);
+    }
+
+    private static int RoundToGrid(int value, int gridSize)
+    {
+        int steps = (int)Math.Round(value / (double)gridSize, MidpointRounding.AwayFromZero);
+        return Math.Max(gridSize, steps * gridSize);
+    }
+
     public static WidgetSnapMatch? ResolveResizeEdge(
         RectInt32 proposedBounds,
         WidgetSnapEdge sourceEdge,

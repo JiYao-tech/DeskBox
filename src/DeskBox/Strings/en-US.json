@@ -805,6 +805,8 @@
     "Settings.ResizeSnap.Description": "Snap while moving or resizing; hold Ctrl and drag a title to move all widgets on the current display",
     "Settings.WidgetSnap.Spacing.Title": "Widget spacing",
     "Settings.WidgetSnap.Spacing.Description": "Gap kept between adjacent widgets after snapping (px)",
+    "Settings.WidgetSnap.GridSize.Title": "Snap grid",
+    "Settings.WidgetSnap.GridSize.Description": "Round widget size to multiples of this grid while resizing so every cell keeps the same size (px, 0 disables)",
     "Settings.HideShortcutArrow.Title": "Hide shortcut arrow overlay",
     "Settings.HideShortcutArrow.Description": "Only affects icons shown inside DeskBox widgets",
     "Settings.ShowHoverButtons.Title": "Show top-right buttons",

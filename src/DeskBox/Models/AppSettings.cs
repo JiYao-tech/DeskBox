@@ -506,6 +506,12 @@ public class AppSettings
     public double WidgetSnapSpacing { get; set; } = 5;
 
     /// <summary>
+    /// Grid step, in effective pixels, that widget sizes snap to while
+    /// resizing. Zero disables grid snapping.
+    /// </summary>
+    public double WidgetSnapGridSize { get; set; }
+
+    /// <summary>
     /// Whether list view should show secondary file details under item names.
     /// </summary>
     public bool ShowListItemDetails { get; set; }

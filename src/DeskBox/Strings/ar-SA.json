@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "المحاذاة عند النقل أو تغيير الحجم؛ اضغط باستمرار على Ctrl واسحب العنوان لنقل جميع العناصر على الشاشة الحالية",
   "Settings.WidgetSnap.Spacing.Title": "تباعد العناصر",
   "Settings.WidgetSnap.Spacing.Description": "المسافة المحفوظة بين العناصر المتجاورة بعد المحاذاة (px)",
+  "Settings.WidgetSnap.GridSize.Title": "شبكة المحاذاة",
+  "Settings.WidgetSnap.GridSize.Description": "تقريب حجم العنصر إلى مضاعفات هذه الشبكة عند تغيير الحجم لتبقى جميع الخلايا بالحجم نفسه (px، 0 يعطّلها)",
   "Settings.HideShortcutArrow.Title": "إخفاء تراكب سهم الاختصار",
   "Settings.HideShortcutArrow.Description": "يؤثر فقط على الرموز المعروضة داخل أدوات DeskBox",
   "Settings.ShowHoverButtons.Title": "إظهار الأزرار العلوية اليمنى",

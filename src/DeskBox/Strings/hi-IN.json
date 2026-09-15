@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "स्थान बदलते या आकार बदलते समय स्नैप करें; मौजूदा स्क्रीन के सभी विजेट साथ ले जाने के लिए Ctrl दबाकर शीर्षक खींचें",
   "Settings.WidgetSnap.Spacing.Title": "विजेट अंतराल",
   "Settings.WidgetSnap.Spacing.Description": "स्नैप के बाद पास-पास के विजेट के बीच रखा गया अंतर (px)",
+  "Settings.WidgetSnap.GridSize.Title": "स्नैप ग्रिड",
+  "Settings.WidgetSnap.GridSize.Description": "आकार बदलते समय विजेट का आकार इस ग्रिड के गुणकों में गोल करें, जिससे सभी सेल एक जैसे रहें (px, 0 बंद करता है)",
   "Settings.HideShortcutArrow.Title": "शॉर्टकट तीर ओवरले छिपाएँ",
   "Settings.HideShortcutArrow.Description": "केवल डेस्कबॉक्स विजेट के अंदर दिखाए गए आइकन को प्रभावित करता है",
   "Settings.ShowHoverButtons.Title": "शीर्ष-दाएँ बटन दिखाएँ",

@@ -323,6 +323,8 @@ namespace DeskBox.ViewModels;
     nameof(WidgetMaterialIntensityValueText),
     nameof(WidgetOpacityValueText),
     nameof(WidgetOpacityVisibility),
+    nameof(WidgetSnapGridSize),
+    nameof(WidgetSnapGridSizeText),
     nameof(WidgetSnapSpacing),
     nameof(WidgetSnapSpacingText),
     nameof(WidgetTransparency),

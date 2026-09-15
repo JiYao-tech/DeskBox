@@ -1112,6 +1112,7 @@ public sealed class SettingsServiceTests : IDisposable
             QuickCaptureEditorEnterBehavior = SettingsService.EditorEnterBehaviorEnterSaves,
             ResizeSnapEnabled = false,
             WidgetSnapSpacing = 27,
+            WidgetSnapGridSize = 24,
             KeepWidgetsVisibleOnShowDesktop = false,
             QuickCaptureTabStyle = SettingsService.WidgetTabStylePivot,
             TodoTabStyle = SettingsService.WidgetTabStylePivot,
@@ -1235,6 +1236,24 @@ public sealed class SettingsServiceTests : IDisposable
             SettingsService.MaxWidgetSnapSpacing,
             SettingsService.NormalizeWidgetSnapSpacing(100));
         Assert.Equal(7.5, SettingsService.NormalizeWidgetSnapSpacing(7.5));
+    }
+
+    [Fact]
+    public void NormalizeWidgetSnapGridSize_UsesFiniteDefaultAndConfiguredRange()
+    {
+        Assert.Equal(
+            SettingsService.DefaultWidgetSnapGridSize,
+            SettingsService.NormalizeWidgetSnapGridSize(double.NaN));
+        Assert.Equal(
+            SettingsService.DefaultWidgetSnapGridSize,
+            SettingsService.NormalizeWidgetSnapGridSize(double.PositiveInfinity));
+        Assert.Equal(
+            SettingsService.MinWidgetSnapGridSize,
+            SettingsService.NormalizeWidgetSnapGridSize(-4));
+        Assert.Equal(
+            SettingsService.MaxWidgetSnapGridSize,
+            SettingsService.NormalizeWidgetSnapGridSize(1000));
+        Assert.Equal(8, SettingsService.NormalizeWidgetSnapGridSize(8));
     }
 
     [Fact]

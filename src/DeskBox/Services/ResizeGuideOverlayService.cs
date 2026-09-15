@@ -45,6 +45,7 @@ public sealed class ResizeGuideOverlayService
     private readonly List<WidgetSnapTarget> _dragSnapTargets = [];
     private RectInt32? _resizeWorkAreaBounds;
     private int _sessionSnapSpacingPhysical;
+    private int _sessionSnapGridSizePhysical;
     private int _sessionSnapEngageThresholdPhysical;
     private int _sessionSnapReleaseThresholdPhysical;
     private WidgetSnapMatch? _currentDragHorizontalMatch;
@@ -66,6 +67,12 @@ public sealed class ResizeGuideOverlayService
     /// Desired visual gap, in effective pixels, between two snapped widgets.
     /// </summary>
     public double SnapSpacingDips { get; set; } = SettingsService.DefaultWidgetSnapSpacing;
+
+    /// <summary>
+    /// Grid step, in effective pixels, that widget sizes snap to while
+    /// resizing.  Zero disables grid snapping.
+    /// </summary>
+    public double SnapGridSizeDips { get; set; } = SettingsService.DefaultWidgetSnapGridSize;
 
     // ─────────────────────────────────────────────────────────────────────
     //  Public API
@@ -93,10 +100,11 @@ public sealed class ResizeGuideOverlayService
     }
 
     /// <summary>
-    /// Called on every PointerMoved during resize.  Checks the proposed bounds
-    /// against all other widget edges and work-area edges, snaps if within
-    /// threshold, and shows edge highlights on both the resizing widget and
-    /// the nearest target widget.
+    /// Called on every PointerMoved during resize.  Rounds the resized
+    /// dimension to the configured grid, checks the proposed bounds against
+    /// all other widget edges and work-area edges, snaps if within threshold,
+    /// and shows edge highlights on both the resizing widget and the nearest
+    /// target widget.
     /// Returns the (possibly snapped) bounds to apply.
     /// </summary>
     public RectInt32 UpdateGuidesAndSnap(
@@ -113,6 +121,22 @@ public sealed class ResizeGuideOverlayService
         var snapped = proposedBounds;
         WidgetSnapMatch? horizontalMatch = null;
         WidgetSnapMatch? verticalMatch = null;
+
+        // ── Grid snapping (uniform cell sizes) ──────────────────────────
+        // Applies first so a neighbouring edge still wins when the user
+        // deliberately aligns two cells.  Capsule resizes pass min/max width
+        // limits because their width is governed by the capsule geometry, so
+        // the grid only applies to free-form cell resizes.
+
+        if (_sessionSnapGridSizePhysical > 0 &&
+            !minimumWidth.HasValue &&
+            !maximumWidth.HasValue)
+        {
+            snapped = WidgetSnapCalculator.SnapResizeToGrid(
+                proposedBounds,
+                resizeDirection,
+                _sessionSnapGridSizePhysical);
+        }
 
         // ── Horizontal edge snapping (Left / Right) ──────────────────────
 
@@ -345,6 +369,8 @@ public sealed class ResizeGuideOverlayService
         double scale = Win32Helper.GetDpiScaleForWindow(hwnd, root.XamlRoot);
         _sessionSnapSpacingPhysical = Math.Max(0, (int)Math.Round(
             SettingsService.NormalizeWidgetSnapSpacing(SnapSpacingDips) * scale));
+        _sessionSnapGridSizePhysical = Math.Max(0, (int)Math.Round(
+            SettingsService.NormalizeWidgetSnapGridSize(SnapGridSizeDips) * scale));
         _sessionSnapEngageThresholdPhysical = Math.Max(1, (int)Math.Round(
             SnapEngageThresholdDips * scale));
         _sessionSnapReleaseThresholdPhysical = Math.Max(

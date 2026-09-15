@@ -91,6 +91,7 @@ internal static class SettingsSearchCatalog
         new("InteractionWindowSettings", "Settings.GlobalHotkey.Title", null),
         new("InteractionWindowSettings", "Settings.ResizeSnap.Title", "Settings.ResizeSnap.Description"),
         new("InteractionWindowSettings", "Settings.WidgetSnap.Spacing.Title", "Settings.WidgetSnap.Spacing.Description"),
+        new("InteractionWindowSettings", "Settings.WidgetSnap.GridSize.Title", "Settings.WidgetSnap.GridSize.Description"),
         new("InteractionWindowSettings", "Settings.DesktopDoubleClick.Title", "Settings.DesktopDoubleClick.Description"),
         new("ManagedStorage", "Settings.ManagedStorage.ListTitle", null),
         new("QuickCaptureSettings", "Settings.QuickCapture.Title", null),

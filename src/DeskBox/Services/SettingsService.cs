@@ -161,6 +161,9 @@ public sealed class SettingsService
     public const double DefaultWidgetSnapSpacing = 5;
     public const double MinWidgetSnapSpacing = 0;
     public const double MaxWidgetSnapSpacing = 32;
+    public const double DefaultWidgetSnapGridSize = 0;
+    public const double MinWidgetSnapGridSize = 0;
+    public const double MaxWidgetSnapGridSize = 64;
     public const string WidgetCollapsedStyleMinimal = "Minimal";
     public const string WidgetCollapsedStyleSummary = "Summary";
     public const string WidgetCollapsedStyleSmart = "Smart";
@@ -610,10 +613,11 @@ settings.WeatherRefreshIntervalMinutes = 60;
         settings.HideShortcutArrowOverlay = true;
         settings.ResizeSnapEnabled = true;
         settings.WidgetSnapSpacing = DefaultWidgetSnapSpacing;
-settings.ShowListItemDetails = false;
-settings.ShowFileItemPathTooltips = true;
-settings.CustomAccentColor = "#0078D4";
-settings.FocusClickedWidgetOnRaise = false;
+        settings.WidgetSnapGridSize = DefaultWidgetSnapGridSize;
+        settings.ShowListItemDetails = false;
+        settings.ShowFileItemPathTooltips = true;
+        settings.CustomAccentColor = "#0078D4";
+        settings.FocusClickedWidgetOnRaise = false;
     }
 
     public SettingsService()
@@ -1481,6 +1485,14 @@ settings.FocusClickedWidgetOnRaise = false;
             changed = true;
         }
 
+        double normalizedWidgetSnapGridSize = NormalizeWidgetSnapGridSize(
+            settings.WidgetSnapGridSize);
+        if (!NearlyEqual(settings.WidgetSnapGridSize, normalizedWidgetSnapGridSize))
+        {
+            settings.WidgetSnapGridSize = normalizedWidgetSnapGridSize;
+            changed = true;
+        }
+
         if (settings.WidgetCapsuleBarOrder is null)
         {
             settings.WidgetCapsuleBarOrder = [];
@@ -1939,6 +1951,18 @@ settings.FocusClickedWidgetOnRaise = false;
             ? value
             : DefaultWidgetSnapSpacing;
         return Math.Clamp(finiteValue, MinWidgetSnapSpacing, MaxWidgetSnapSpacing);
+    }
+
+    /// <summary>
+    /// Normalizes the widget resize snap grid size into the supported range.
+    /// A value of 0 (or below) disables grid snapping entirely.
+    /// </summary>
+    public static double NormalizeWidgetSnapGridSize(double value)
+    {
+        double finiteValue = double.IsFinite(value)
+            ? value
+            : DefaultWidgetSnapGridSize;
+        return Math.Clamp(finiteValue, MinWidgetSnapGridSize, MaxWidgetSnapGridSize);
     }
 
     public static string NormalizeWidgetCollapsedStyle(string? value)

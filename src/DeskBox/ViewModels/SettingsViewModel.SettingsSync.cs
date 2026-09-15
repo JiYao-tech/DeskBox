@@ -63,6 +63,8 @@ public partial class SettingsViewModel
             ResizeSnapEnabled = settings.ResizeSnapEnabled;
             WidgetSnapSpacing = SettingsService.NormalizeWidgetSnapSpacing(
                 settings.WidgetSnapSpacing);
+            WidgetSnapGridSize = SettingsService.NormalizeWidgetSnapGridSize(
+                settings.WidgetSnapGridSize);
             KeepWidgetsVisibleOnShowDesktop = settings.KeepWidgetsVisibleOnShowDesktop;
             ShowListItemDetails = settings.ShowListItemDetails;
             ShowFileItemPathTooltips = settings.ShowFileItemPathTooltips;

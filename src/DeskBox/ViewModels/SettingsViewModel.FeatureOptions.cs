@@ -509,6 +509,7 @@ public partial class SettingsViewModel
     public string VerticalSpacingValueText => $"{Math.Round(VerticalSpacingScale * 100):0}%";
     public string FileNameWidthValueText => $"{Math.Round(FileNameWidthScale * 100):0}%";
     public string WidgetSnapSpacingText => $"{WidgetSnapSpacing:0.#} px";
+    public string WidgetSnapGridSizeText => $"{WidgetSnapGridSize:0.#} px";
     public string DefaultWidthInput
     {
         get => FormatNumber(DefaultWidth, 0);

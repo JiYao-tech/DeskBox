@@ -379,7 +379,7 @@ P0：§6 重写为 Runtime 矩阵（删除 A→B→C 旧结论，与 §14 唯一
 | 4 | 陈旧 worktree wingezi-glance-memory-20260905 + 分支 | 可删（0a496114 已在 main） |
 | 5 | Features/ 物理搬迁 / grandfather 三文件迁移 | 维持推迟至阶段 2/3 |
 
-**批次 D 前置决策（已定）**：MusicSettingsSection 命名空间落 `DeskBox.Controls.WidgetContents`（文件仍在 Views/SettingsSections/，命名空间≠目录是 C# 合法形态，且该命名空间已在功能 using 白名单内零扰动）；实现纪律=保持 `{Binding}` 不改 x:Bind（保 327 计数）、保 `x:Name="MusicSettingsSection"`（Slice 断言端点）、Music 文件计数 13→15 有意更新。
+**批次 D 前置决策（已定）**：MusicSettingsSection 命名空间落 `DeskBox.Controls.WidgetContents`（文件仍在 Views/SettingsSections/，命名空间≠目录是 C# 合法形态，且该命名空间已在功能 using 白名单内零扰动）；实现纪律=保持 `{Binding}` 不改 x:Bind（保 329 计数）、保 `x:Name="MusicSettingsSection"`（Slice 断言端点）、Music 文件计数 13→15 有意更新。
 
 ### 16.5 中期外部评审吸收（v1.6，2026-09-07，PR #231 合并后）
 

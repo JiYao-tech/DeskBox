@@ -1275,6 +1275,8 @@
   "Settings.ResizeSnap.Description": "拖動或調整大小時自動吸附；按住 Ctrl 拖動標題可整體移動目前螢幕上的格子",
   "Settings.WidgetSnap.Spacing.Title": "格子間距",
   "Settings.WidgetSnap.Spacing.Description": "吸附後相鄰格子之間保留的間隔（px）",
+  "Settings.WidgetSnap.GridSize.Title": "吸附網格",
+  "Settings.WidgetSnap.GridSize.Description": "拖曳邊框調整格子大小時，尺寸自動對齊到該網格的整數倍，確保格子大小一致（px，0 表示關閉）",
   "Settings.Animation.Effect.SlideDownFade": "向下滑動淡入",
   "Settings.Animation.Speed.Description": "選擇小工具動畫的持續時長",
   "Settings.BorderColor.Title": "邊框顏色",

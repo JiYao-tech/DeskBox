@@ -805,6 +805,8 @@
   "Settings.ResizeSnap.Description": "Привязка при перемещении или изменении размера; удерживайте Ctrl и перетаскивайте заголовок, чтобы переместить все виджеты на текущем экране",
   "Settings.WidgetSnap.Spacing.Title": "Интервал между виджетами",
   "Settings.WidgetSnap.Spacing.Description": "Зазор между соседними виджетами после привязки (px)",
+  "Settings.WidgetSnap.GridSize.Title": "Сетка привязки",
+  "Settings.WidgetSnap.GridSize.Description": "Округление размера виджета до кратного этой сетке при изменении размера, чтобы все ячейки были одинаковыми (px, 0 — отключено)",
   "Settings.HideShortcutArrow.Title": "Скрыть наложение стрелки быстрого доступа",
   "Settings.HideShortcutArrow.Description": "Влияет только на значки, отображаемые внутри виджетов DeskBox.",
   "Settings.ShowHoverButtons.Title": "Показать верхние правые кнопки",
