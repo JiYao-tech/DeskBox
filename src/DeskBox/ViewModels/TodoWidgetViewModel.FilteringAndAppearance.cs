@@ -71,9 +71,21 @@ public sealed partial class TodoWidgetViewModel
     private async Task SaveAsync()
     {
         NormalizeSortOrders();
+        var liveIds = new HashSet<string>(
+            Items.Select(item => item.Item.Id),
+            StringComparer.Ordinal);
+        // Tombstones persist alongside live items so merge restores cannot
+        // resurrect deleted entries; a live item always shadows its stub.
+        var persistedTombstones = _tombstones
+            .Where(item => !liveIds.Contains(item.Id))
+            .OrderByDescending(item => item.UpdatedAt)
+            .Take(MaxRetainedTombstones)
+            .ToList();
+        _tombstones.Clear();
+        _tombstones.AddRange(persistedTombstones);
         await _store.SaveAsync(new TodoWidgetData
         {
-            Items = Items.Select(item => item.Item).ToList()
+            Items = Items.Select(item => item.Item).Concat(persistedTombstones).ToList()
         });
     }
 
@@ -425,9 +437,7 @@ public sealed partial class TodoWidgetViewModel
 
     private static string NormalizeNewTaskPosition(string? value)
     {
-        return value == SettingsService.TodoNewTaskPositionBottom
-            ? SettingsService.TodoNewTaskPositionBottom
-            : SettingsService.TodoNewTaskPositionTop;
+        return SettingsService.NormalizeTodoNewTaskPosition(value);
     }
 
     private static DateTimeOffset? NormalizeDueDate(DateTimeOffset? dueDate)
@@ -709,7 +719,8 @@ public sealed partial class TodoWidgetViewModel
             GeneratedNextItemId = item.GeneratedNextItemId,
             SortOrder = item.SortOrder,
             CreatedAt = item.CreatedAt,
-            UpdatedAt = item.UpdatedAt
+            UpdatedAt = item.UpdatedAt,
+            IsDeleted = item.IsDeleted
         };
     }
 

@@ -65,6 +65,8 @@ public sealed partial class FileItemSurface : UserControl, INotifyPropertyChange
     private FrameworkElement? _listLayout;
     private TextBlock? _iconItemNameText;
     private TextBlock? _listItemNameText;
+    private FrameworkElement? _iconIconHost;
+    private FrameworkElement? _listIconHost;
 
     public FileItemSurface()
     {
@@ -118,9 +120,11 @@ public sealed partial class FileItemSurface : UserControl, INotifyPropertyChange
             : Visibility.Collapsed;
 
     public HorizontalAlignment SurfaceHorizontalAlignment =>
-        Mode == FileItemSurfaceMode.List
-            ? HorizontalAlignment.Left
-            : HorizontalAlignment.Stretch;
+        // Both layouts stretch so the interactive surface - hover, selection,
+        // drop feedback - covers the full row in list mode (Explorer-style
+        // full-row select) and the full tile in icon mode. The list content
+        // itself stays left-aligned inside the stretched border.
+        HorizontalAlignment.Stretch;
 
     public double SurfaceMaxWidth => double.PositiveInfinity;
 
@@ -208,6 +212,14 @@ public sealed partial class FileItemSurface : UserControl, INotifyPropertyChange
 
     public Border InteractiveBorder => SurfaceBorder;
 
+    /// <summary>
+    /// The icon glyph host of the active layout. Application-shortcut launch
+    /// hit-testing scopes to this element, so only the icon - not the label
+    /// or the tile padding around it - claims a launch drop.
+    /// </summary>
+    internal FrameworkElement? IconHitTestElement =>
+        Mode == FileItemSurfaceMode.List ? _listIconHost : _iconIconHost;
+
     public TextBlock ItemNameText
     {
         get
@@ -236,24 +248,26 @@ public sealed partial class FileItemSurface : UserControl, INotifyPropertyChange
         {
             if (_listLayout is null)
             {
-                (_listLayout, _listItemNameText) = CreateLayout(
-                    "ListItemLayoutTemplate", "ListItemNameText");
+                (_listLayout, _listItemNameText, _listIconHost) = CreateLayout(
+                    "ListItemLayoutTemplate", "ListItemNameText", "ListItemIconHost");
             }
         }
         else if (_iconLayout is null)
         {
-            (_iconLayout, _iconItemNameText) = CreateLayout(
-                "IconItemLayoutTemplate", "IconItemNameText");
+            (_iconLayout, _iconItemNameText, _iconIconHost) = CreateLayout(
+                "IconItemLayoutTemplate", "IconItemNameText", "IconItemIconHost");
         }
     }
 
-    private (FrameworkElement Layout, TextBlock NameText) CreateLayout(
+    private (FrameworkElement Layout, TextBlock NameText, FrameworkElement IconHost) CreateLayout(
         string templateKey,
-        string nameElement)
+        string nameElement,
+        string iconHostElement)
     {
         var template = (DataTemplate)Resources[templateKey];
         var layout = (FrameworkElement)template.LoadContent();
         var nameText = (TextBlock)layout.FindName(nameElement);
+        var iconHost = (FrameworkElement)layout.FindName(iconHostElement);
         var bindings = Microsoft.UI.Xaml.Markup.XamlBindingHelper
             .GetDataTemplateComponent(layout) ??
             throw new InvalidOperationException($"Missing file item bindings: {templateKey}");
@@ -264,7 +278,7 @@ public sealed partial class FileItemSurface : UserControl, INotifyPropertyChange
         // Ordinary file/thumbnail bindings therefore keep their original source.
         bindings.ProcessBindings(this, 0, 0, out _);
         LayoutHost.Children.Add(layout);
-        return (layout, nameText);
+        return (layout, nameText, iconHost);
     }
 
     internal void SetTransferState(

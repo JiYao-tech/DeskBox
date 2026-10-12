@@ -48,6 +48,7 @@ public sealed class QuickCaptureService
     private static readonly TimeSpan ExportCleanupAge = TimeSpan.FromDays(1);
 
     private readonly QuickCaptureStore _store;
+    private readonly Func<string, Task<bool>>? _recycleAttachmentFileAsync;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _thumbnailTaskLock = new();
     private readonly Dictionary<string, Task<string?>> _thumbnailTasks = new(StringComparer.OrdinalIgnoreCase);
@@ -55,9 +56,12 @@ public sealed class QuickCaptureService
 
     public event Action? Changed;
 
-    public QuickCaptureService(QuickCaptureStore? store = null)
+    public QuickCaptureService(
+        QuickCaptureStore? store = null,
+        Func<string, Task<bool>>? recycleAttachmentFileAsync = null)
     {
         _store = store ?? new QuickCaptureStore();
+        _recycleAttachmentFileAsync = recycleAttachmentFileAsync;
     }
 
     public async Task<QuickCaptureStoreData> GetDataAsync()
@@ -739,17 +743,16 @@ public sealed class QuickCaptureService
             _gate.Release();
             if (removalPersisted &&
                 removedAttachment is { IsManagedCopy: true } &&
-                File.Exists(removedAttachment.FilePath) &&
                 !IsPathInsideDirectory(removedAttachment.FilePath, _store.ImageDirectory))
             {
-                try
-                {
-                    File.Delete(removedAttachment.FilePath);
-                }
-                catch (Exception ex)
-                {
-                    App.Log($"[QuickCaptureService] Failed to delete managed attachment: {ex.Message}");
-                }
+                // Files in the shared image cache stay owned by the refcount
+                // GC above; anything else is deleted only when provably
+                // inside the managed attachment tree, through the recycle
+                // kernel (containment gate inside TryDeleteManagedCopyAsync).
+                await AttachmentStorageService.TryDeleteManagedCopyAsync(
+                    removedAttachment.FilePath,
+                    _store.AttachmentDirectory,
+                    _recycleAttachmentFileAsync);
             }
         }
     }
@@ -817,7 +820,13 @@ public sealed class QuickCaptureService
             }
 
             var deletedItem = Clone(item);
-            _data.Items.Remove(item);
+            // Tombstone, not physical removal: a merge restore treats an
+            // absent id as "unknown to this device" and would resurrect the
+            // item. The stub keeps the delete winning by LWW while stripping
+            // the payload from the store file — undo restores from the
+            // in-memory snapshot, not from the store.
+            int itemIndex = _data.Items.IndexOf(item);
+            _data.Items[itemIndex] = CreateTombstoneStub(item, DateTimeOffset.UtcNow, isRecent: false);
             NormalizeSortOrders(_data.Items);
             NormalizePinnedSortOrders(_data.Items);
             await SaveCoreAsync();
@@ -857,9 +866,18 @@ public sealed class QuickCaptureService
             var snapshots = itemsToDelete
                 .Select(item => new QuickCaptureDeletedItemSnapshot(Clone(item), isRecent))
                 .ToList();
+            var deletedAt = DateTimeOffset.UtcNow;
             foreach (var item in itemsToDelete)
             {
-                source.Remove(item);
+                // Content-stripped tombstone (see DeleteItemAsync): merge
+                // protection needs only id + timestamps, and the payload
+                // must not survive a delete in the store file or in cloud
+                // backups of it.
+                int index = source.IndexOf(item);
+                if (index >= 0)
+                {
+                    source[index] = CreateTombstoneStub(item, deletedAt, isRecent);
+                }
             }
 
             NormalizeSortOrders(source);
@@ -895,7 +913,9 @@ public sealed class QuickCaptureService
             }
 
             var deletedItem = Clone(item);
-            _data.RecentItems.Remove(item);
+            // Content-stripped tombstone (see DeleteItemAsync).
+            int recentIndex = _data.RecentItems.IndexOf(item);
+            _data.RecentItems[recentIndex] = CreateTombstoneStub(item, DateTimeOffset.UtcNow, isRecent: true);
             NormalizeSortOrders(_data.RecentItems);
             await SaveCoreAsync();
             return new QuickCaptureDeletedItemSnapshot(deletedItem, IsRecent: true);
@@ -918,9 +938,30 @@ public sealed class QuickCaptureService
         {
             await EnsureLoadedCoreAsync();
             var targetItems = snapshot.IsRecent ? _data!.RecentItems : _data!.Items;
-            if (targetItems.Any(item => string.Equals(item.Id, snapshot.Item.Id, StringComparison.Ordinal)))
+            if (targetItems.FirstOrDefault(item =>
+                    string.Equals(item.Id, snapshot.Item.Id, StringComparison.Ordinal)) is { } existing)
             {
-                return false;
+                if (!existing.IsDeleted)
+                {
+                    return false;
+                }
+
+                // Undo resurrects the tombstone left by the delete — the
+                // refreshed timestamp also wins any later merge conflict.
+                int existingIndex = targetItems.IndexOf(existing);
+                var resurrected = Clone(snapshot.Item);
+                resurrected.IsDeleted = false;
+                resurrected.UpdatedAt = DateTimeOffset.UtcNow;
+                targetItems[existingIndex] = resurrected;
+
+                NormalizeSortOrders(targetItems);
+                if (!snapshot.IsRecent)
+                {
+                    NormalizePinnedSortOrders(_data.Items);
+                }
+
+                await SaveCoreAsync();
+                return true;
             }
 
             var item = Clone(snapshot.Item);
@@ -948,8 +989,15 @@ public sealed class QuickCaptureService
         try
         {
             await EnsureLoadedCoreAsync();
-            _data!.Items.Clear();
-            _data.RecentItems.Clear();
+            // Stub tombstones keep the wipe winning merge restores without
+            // retaining cleared content in the store file.
+            var clearedAt = DateTimeOffset.UtcNow;
+            _data!.Items = _data.Items
+                .Select(item => item.IsDeleted ? item : CreateTombstoneStub(item, clearedAt, isRecent: false))
+                .ToList();
+            _data.RecentItems = _data.RecentItems
+                .Select(item => item.IsDeleted ? item : CreateTombstoneStub(item, clearedAt, isRecent: true))
+                .ToList();
             await SaveCoreAsync();
             CleanupUnusedImageCacheCore();
             TryDeleteDirectory(_store.AttachmentDirectory);
@@ -966,7 +1014,10 @@ public sealed class QuickCaptureService
         try
         {
             await EnsureLoadedCoreAsync();
-            _data!.RecentItems.Clear();
+            var clearedAt = DateTimeOffset.UtcNow;
+            _data!.RecentItems = _data.RecentItems
+                .Select(item => item.IsDeleted ? item : CreateTombstoneStub(item, clearedAt, isRecent: true))
+                .ToList();
             await SaveCoreAsync();
             CleanupUnusedImageCacheCore();
         }
@@ -976,12 +1027,14 @@ public sealed class QuickCaptureService
         }
     }
 
-    public async Task TrimRecentItemsAsync(int maxRecentItems)
+    public async Task TrimRecentItemsAsync(int maxRecentItems,
+        CancellationToken cancellationToken = default)
     {
-        await _gate.WaitAsync();
+        await _gate.WaitAsync(cancellationToken);
         try
         {
             await EnsureLoadedCoreAsync();
+            cancellationToken.ThrowIfCancellationRequested();
             int before = _data!.RecentItems.Count;
             TrimRecentItemsCore(NormalizeRecentLimit(maxRecentItems));
             if (_data.RecentItems.Count != before)
@@ -1513,6 +1566,7 @@ public sealed class QuickCaptureService
         return _data!.Items
             .Concat(_data.RecentItems)
             .Where(item => item is not null &&
+                           !item.IsDeleted &&
                            item.Type == QuickCaptureItemType.Image &&
                            !string.IsNullOrWhiteSpace(item.ImagePath))
             .Select(item => NormalizePath(item.ImagePath))
@@ -1658,9 +1712,31 @@ public sealed class QuickCaptureService
         };
     }
 
+    /// <summary>
+    /// A tombstone stripped of user content: keeps the id + timestamps so a
+    /// merge restore cannot resurrect a deleted or wiped item, while the
+    /// payload actually leaves the store file (and any cloud backup of it).
+    /// Undo restores from the in-memory delete snapshot, not from this stub.
+    /// </summary>
+    private static QuickCaptureItem CreateTombstoneStub(
+        QuickCaptureItem item,
+        DateTimeOffset deletedAt,
+        bool isRecent) =>
+        new()
+        {
+            Id = item.Id,
+            IsDeleted = true,
+            IsRecent = isRecent,
+            SortOrder = item.SortOrder,
+            CreatedAt = item.CreatedAt,
+            UpdatedAt = deletedAt
+        };
+
     private void TrimRecentItemsCore(int maxRecentItems)
     {
-        _data!.RecentItems = _data.RecentItems
+        // Only live entries compete for the recent window; tombstones are
+        // kept outside it so a trim can never drop delete protection.
+        var liveItems = _data!.RecentItems
             .Where(item => !item.IsDeleted &&
                            (!string.IsNullOrWhiteSpace(item.Body) ||
                             (item.Type == QuickCaptureItemType.Image && !string.IsNullOrWhiteSpace(item.ImagePath))))
@@ -1668,6 +1744,13 @@ public sealed class QuickCaptureService
             .ThenByDescending(item => item.UpdatedAt)
             .Take(maxRecentItems)
             .ToList();
+        var tombstoneItems = _data.RecentItems
+            .Where(item => item is not null && item.IsDeleted)
+            .GroupBy(item => item.Id, StringComparer.Ordinal)
+            .Select(group => group.OrderByDescending(item => item.UpdatedAt).First())
+            .ToList();
+
+        _data.RecentItems = liveItems.Concat(tombstoneItems).ToList();
 
         NormalizeSortOrders(_data.RecentItems);
     }

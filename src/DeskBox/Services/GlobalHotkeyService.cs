@@ -1,11 +1,12 @@
 using System.Runtime.InteropServices;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using Windows.System;
 
 namespace DeskBox.Services;
 
-public sealed class GlobalHotkeyService : IDisposable
+public sealed class GlobalHotkeyService : IDisposable, IHookHealthProbeTarget, IHookRegistrationMaintenanceTarget
 {
     public const uint WmHotkey = 0x0312;
     private const uint WmReservedHotkey = 0x8442;
@@ -17,6 +18,12 @@ public sealed class GlobalHotkeyService : IDisposable
     private const uint ModNoRepeat = 0x4000;
     private static readonly UIntPtr SubclassId = new(0x4442);
 
+    // Hardware Copilot keys deliver Left Shift + Win + F23 on most keyboards,
+    // so the preset registers that chord instead of adding a new activation kind.
+    public static GlobalHotkeyGesture CopilotKeyGesture { get; } = new(
+        HotkeyModifierKeys.Windows | HotkeyModifierKeys.Shift,
+        (int)VirtualKey.F23);
+
     private readonly SettingsService _settingsService;
     private readonly LocalizationService _localizationService;
     private readonly Func<Task> _invokeAsync;
@@ -26,6 +33,7 @@ public sealed class GlobalHotkeyService : IDisposable
     private bool _isSubclassInstalled;
     private bool _isRegistered;
     private bool _usesReservedHook;
+    private bool _suspendedForRecording;
     private long _receivedSequence;
     private long _invocationSequence;
     private long _dispatchFailureSequence;
@@ -54,6 +62,7 @@ public sealed class GlobalHotkeyService : IDisposable
     public long ReservedHookTriggerCount => _reservedHotkeyHook.TriggerCount;
     public long ReservedHookPostFailureCount => _reservedHotkeyHook.PostFailureCount;
     public long ReservedHookInputFailureCount => _reservedHotkeyHook.InputFailureCount;
+    public long ReservedHookStartMenuLeakCount => _reservedHotkeyHook.StartMenuLeakCount;
     public string? LastError { get; private set; }
 
     public GlobalHotkeyActivation CurrentActivation => NormalizeActivation(
@@ -103,15 +112,35 @@ public sealed class GlobalHotkeyService : IDisposable
 
     public void RefreshRegistration()
     {
-        Unregister();
+        RefreshRegistrationCore(quiet: false);
+    }
+
+    /// <summary>
+    /// The registration round-trip. RegisterHotKey has no query API, so the
+    /// unregister+register pair doubles as the self-check: the register call's
+    /// outcome is the only observable truth about whether the chord is still
+    /// deliverable. The quiet mode is used by the watchdog heartbeat so a
+    /// healthy periodic refresh neither floods the log nor re-renders the
+    /// settings page.
+    /// </summary>
+    private void RefreshRegistrationCore(bool quiet)
+    {
+        Unregister(quiet);
         LastError = null;
 
-        App.Log($"[GlobalHotkey] RefreshRegistration hwnd=0x{_windowHandle.ToInt64():X} enabled={_settingsService.Settings.GlobalHotkeyEnabled} gesture={CurrentGestureText}");
+        if (!quiet)
+        {
+            App.Log($"[GlobalHotkey] RefreshRegistration hwnd=0x{_windowHandle.ToInt64():X} enabled={_settingsService.Settings.GlobalHotkeyEnabled} gesture={CurrentGestureText}");
+        }
 
         if (_windowHandle == IntPtr.Zero || !_settingsService.Settings.GlobalHotkeyEnabled)
         {
             App.Log("[GlobalHotkey] RefreshRegistration skipped: handle=0 or disabled");
-            NotifyRegistrationChanged();
+            if (!quiet)
+            {
+                NotifyRegistrationChanged();
+            }
+
             return;
         }
 
@@ -120,7 +149,11 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             App.Log("[GlobalHotkey] RefreshRegistration skipped: invalid activation");
             LastError = _localizationService.T("Settings.GlobalHotkey.Status.Invalid");
-            NotifyRegistrationChanged();
+            if (!quiet)
+            {
+                NotifyRegistrationChanged();
+            }
+
             return;
         }
 
@@ -128,7 +161,11 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             App.Log("[GlobalHotkey] RefreshRegistration skipped: window subclass unavailable");
             LastError = _localizationService.T("Settings.GlobalHotkey.Status.Unavailable");
-            NotifyRegistrationChanged();
+            if (!quiet)
+            {
+                NotifyRegistrationChanged();
+            }
+
             return;
         }
 
@@ -138,7 +175,11 @@ public sealed class GlobalHotkeyService : IDisposable
             {
                 App.Log("[GlobalHotkey] Reserved hotkey hook disabled by environment");
                 LastError = _localizationService.T("Settings.GlobalHotkey.Status.Unavailable");
-                NotifyRegistrationChanged();
+                if (!quiet)
+                {
+                    NotifyRegistrationChanged();
+                }
+
                 return;
             }
 
@@ -163,10 +204,14 @@ public sealed class GlobalHotkeyService : IDisposable
             {
                 _isRegistered = true;
                 _usesReservedHook = true;
-                App.Log(
-                    $"[GlobalHotkey] Registered reserved gesture={CurrentGestureText} " +
-                    $"mode=hook hwnd=0x{_windowHandle.ToInt64():X}");
-                NotifyRegistrationChanged();
+                if (!quiet)
+                {
+                    App.Log(
+                        $"[GlobalHotkey] Registered reserved gesture={CurrentGestureText} " +
+                        $"mode=hook hwnd=0x{_windowHandle.ToInt64():X}");
+                    NotifyRegistrationChanged();
+                }
+
                 return;
             }
 
@@ -174,21 +219,32 @@ public sealed class GlobalHotkeyService : IDisposable
                 $"[GlobalHotkey] Reserved hook registration failed gesture={CurrentGestureText} " +
                 $"error={hookError}");
             LastError = _localizationService.T("Settings.GlobalHotkey.Status.Unavailable");
-            NotifyRegistrationChanged();
+            if (!quiet)
+            {
+                NotifyRegistrationChanged();
+            }
+
             return;
         }
 
         if (Register(_windowHandle, MainHotkeyId, activation.Gesture, out int registerError))
         {
             _isRegistered = true;
-            App.Log($"[GlobalHotkey] Registered gesture={CurrentGestureText} hwnd=0x{_windowHandle.ToInt64():X}");
-            NotifyRegistrationChanged();
+            if (!quiet)
+            {
+                App.Log($"[GlobalHotkey] Registered gesture={CurrentGestureText} hwnd=0x{_windowHandle.ToInt64():X}");
+                NotifyRegistrationChanged();
+            }
+
             return;
         }
 
         App.Log($"[GlobalHotkey] RegisterHotKey failed gesture={CurrentGestureText} error={registerError}");
         LastError = _localizationService.T("Settings.GlobalHotkey.Status.Conflict");
-        NotifyRegistrationChanged();
+        if (!quiet)
+        {
+            NotifyRegistrationChanged();
+        }
     }
 
     public bool TryApplyGesture(GlobalHotkeyGesture gesture, out string? error)
@@ -206,6 +262,14 @@ public sealed class GlobalHotkeyService : IDisposable
         if (!IsValidActivation(activation))
         {
             error = _localizationService.T("Settings.GlobalHotkey.Status.Invalid");
+            return false;
+        }
+
+        if (activation.Kind == HotkeyActivationKind.Chord &&
+            IsReservedSystemGesture(activation.Gesture) &&
+            IsGestureOwnedBySearchHotkey(activation.Gesture))
+        {
+            error = _localizationService.T("Settings.GlobalHotkey.Status.SearchHotkeyConflict");
             return false;
         }
 
@@ -284,6 +348,89 @@ public sealed class GlobalHotkeyService : IDisposable
         RefreshRegistration();
     }
 
+    /// <summary>
+    /// Drops the current registration (including the reserved hook) while the
+    /// recorder dialog captures input, so the live hotkey cannot fire or eat
+    /// the keys being recorded. Settings are untouched;
+    /// <see cref="ResumeAfterRecording"/> restores registration from them.
+    /// </summary>
+    public void SuspendForRecording()
+    {
+        _suspendedForRecording = true;
+        Unregister();
+    }
+
+    public void ResumeAfterRecording()
+    {
+        _suspendedForRecording = false;
+        RefreshRegistration();
+    }
+
+    string IHookHealthProbeTarget.ProbeName => "global-hotkey";
+
+    // The reserved-gesture path owns a low-level hook that Windows silently
+    // removes once its thread misses LowLevelHooksTimeout deliveries, so it
+    // participates in callback liveness probing. RegisterHotKey chords deliver
+    // WM_HOTKEY, have no callback and no query API, so they cannot be probed;
+    // the watchdog keeps them alive with a periodic unregister+register
+    // round-trip instead (feedback 308/371 showed chord registrations silently
+    // dead in the field while the UI believed them registered).
+    bool IHookHealthProbeTarget.HookProbeWanted => _usesReservedHook && _isRegistered;
+
+    bool IHookHealthProbeTarget.HookConfirmedDead => !_reservedHotkeyHook.IsActive;
+
+    long IHookHealthProbeTarget.LastHookCallbackTicks => _reservedHotkeyHook.LastCallbackTicks;
+
+    Task<bool> IHookHealthProbeTarget.ProbeHookAliveAsync(int echoWaitMilliseconds) =>
+        _reservedHotkeyHook.ProbeAliveAsync(echoWaitMilliseconds);
+
+    void IHookHealthProbeTarget.RecoverHook() => RefreshRegistration();
+
+    string IHookRegistrationMaintenanceTarget.MaintenanceName => "global-hotkey-registration";
+
+    bool IHookRegistrationMaintenanceTarget.RegistrationMaintenanceWanted =>
+        !_suspendedForRecording &&
+        _windowHandle != IntPtr.Zero &&
+        _settingsService.Settings.GlobalHotkeyEnabled &&
+        UsesRegisterHotKeyChord(CurrentActivation);
+
+    bool IHookRegistrationMaintenanceTarget.RegistrationHealthy => IsRegistered;
+
+    void IHookRegistrationMaintenanceTarget.RunRegistrationHeartbeat()
+    {
+        // The recorder dialog suspends registration so the live hotkey cannot
+        // eat the keys being captured; a heartbeat that re-registered
+        // mid-recording would break that contract. Both this method and the
+        // suspend/resume calls run on the UI dispatcher, so the flag read is
+        // race-free.
+        if (_suspendedForRecording)
+        {
+            return;
+        }
+
+        bool wasRegistered = IsRegistered;
+        string? previousError = LastError;
+        RefreshRegistrationCore(quiet: true);
+        App.Log(
+            $"[GlobalHotkey] Heartbeat refreshed gesture={CurrentGestureText} " +
+            $"registered={IsRegistered}");
+        if (IsRegistered != wasRegistered ||
+            !string.Equals(previousError, LastError, StringComparison.Ordinal))
+        {
+            NotifyRegistrationChanged();
+        }
+    }
+
+    /// <summary>
+    /// True when the activation rides the plain RegisterHotKey chord path
+    /// (the one the watchdog heartbeat keeps alive), as opposed to the
+    /// reserved low-level-hook modes the liveness probe covers.
+    /// </summary>
+    internal static bool UsesRegisterHotKeyChord(GlobalHotkeyActivation activation)
+    {
+        return IsValidActivation(activation) && !TryGetReservedHookMode(activation, out _);
+    }
+
     public bool ResetToDefault(out string? error)
     {
         var activation = new GlobalHotkeyActivation(
@@ -331,6 +478,11 @@ public sealed class GlobalHotkeyService : IDisposable
                    HotkeyModifierKeys.Alt;
     }
 
+    internal static bool IsGestureOwnedBySearchHotkey(GlobalHotkeyGesture gesture)
+    {
+        return App.Current?.SearchHotkeyService?.CurrentGesture.Equals(gesture) == true;
+    }
+
     public static bool IsValidActivation(GlobalHotkeyActivation activation)
     {
         if (!Enum.IsDefined(activation.Kind))
@@ -369,13 +521,6 @@ public sealed class GlobalHotkeyService : IDisposable
                    (int)VirtualKey.F12;
     }
 
-    public static bool IsRiskyActivation(GlobalHotkeyActivation activation)
-    {
-        return activation.Kind == HotkeyActivationKind.WindowsTap ||
-               (activation.Kind == HotkeyActivationKind.Chord &&
-                IsRiskyGesture(activation.Gesture));
-    }
-
     public static string FormatActivation(
         GlobalHotkeyActivation activation,
         LocalizationService localization)
@@ -395,6 +540,11 @@ public sealed class GlobalHotkeyService : IDisposable
         if (gesture.VirtualKey <= 0)
         {
             return localization.T("Settings.GlobalHotkey.NotSet");
+        }
+
+        if (gesture.Equals(CopilotKeyGesture))
+        {
+            return localization.T("Settings.GlobalHotkey.Preset.CopilotKey");
         }
 
         var parts = new List<string>();
@@ -486,9 +636,54 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             App.Log($"[GlobalHotkey] Invocation failed id={invocationId}: {ex}");
         }
+
+        if (_usesReservedHook)
+        {
+            _ = ProbeWindowsTapStartMenuLeakAsync(invocationId);
+        }
     }
 
-    private void Unregister()
+    /// <summary>
+    /// Detects, for diagnostics only, that a WindowsTap trigger lost the
+    /// Start-menu mask race: the mask injection never fails with an error
+    /// for a lost race, so a delayed foreground check is the only trace
+    /// (feedback 367). Dismissing the just-opened Start menu was rejected
+    /// because it is by definition a visible flicker.
+    /// </summary>
+    private async Task ProbeWindowsTapStartMenuLeakAsync(long invocationId)
+    {
+        const int probeDelayMilliseconds = 400;
+        try
+        {
+            await Task.Delay(probeDelayMilliseconds);
+            if (!_usesReservedHook ||
+                !TryGetReservedHookMode(CurrentActivation, out ReservedHotkeyMode mode) ||
+                mode != ReservedHotkeyMode.WindowsTap)
+            {
+                return;
+            }
+
+            if (!WindowsTapStartMenuLeakProbe.TryGetForegroundProcessName(
+                    out string? foregroundProcessName) ||
+                !WindowsTapStartMenuLeakPolicy.IsStartMenuHostProcessName(
+                    foregroundProcessName))
+            {
+                return;
+            }
+
+            _reservedHotkeyHook.RecordStartMenuLeak();
+            App.Log(
+                $"[GlobalHotkey] WindowsTap start-menu mask lost the race " +
+                $"id={invocationId} foreground={foregroundProcessName} " +
+                $"totalLeaks={_reservedHotkeyHook.StartMenuLeakCount}");
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[GlobalHotkey] Start-menu leak probe failed: {ex.Message}");
+        }
+    }
+
+    private void Unregister(bool quiet = false)
     {
         if (_usesReservedHook || _reservedHotkeyHook.IsActive)
         {
@@ -500,12 +695,19 @@ public sealed class GlobalHotkeyService : IDisposable
             {
                 App.Log($"[GlobalHotkey] Reserved hook removal failed: {ex}");
             }
-            App.Log($"[GlobalHotkey] Reserved hook removed gesture={CurrentGestureText}");
+
+            if (!quiet)
+            {
+                App.Log($"[GlobalHotkey] Reserved hook removed gesture={CurrentGestureText}");
+            }
         }
         else if (_isRegistered && _windowHandle != IntPtr.Zero)
         {
             Win32Helper.UnregisterHotKey(_windowHandle, MainHotkeyId);
-            App.Log($"[GlobalHotkey] Unregistered gesture={CurrentGestureText}");
+            if (!quiet)
+            {
+                App.Log($"[GlobalHotkey] Unregistered gesture={CurrentGestureText}");
+            }
         }
 
         _isRegistered = false;
@@ -589,26 +791,6 @@ public sealed class GlobalHotkeyService : IDisposable
         return value;
     }
 
-    internal static bool AreCurrentModifiersPressed(HotkeyModifierKeys modifiers)
-    {
-        bool ctrl = Win32Helper.IsKeyDown((int)VirtualKey.Control) ||
-                    Win32Helper.IsKeyDown((int)VirtualKey.LeftControl) ||
-                    Win32Helper.IsKeyDown((int)VirtualKey.RightControl);
-        bool alt = Win32Helper.IsKeyDown((int)VirtualKey.Menu) ||
-                   Win32Helper.IsKeyDown((int)VirtualKey.LeftMenu) ||
-                   Win32Helper.IsKeyDown((int)VirtualKey.RightMenu);
-        bool shift = Win32Helper.IsKeyDown((int)VirtualKey.Shift) ||
-                     Win32Helper.IsKeyDown((int)VirtualKey.LeftShift) ||
-                     Win32Helper.IsKeyDown((int)VirtualKey.RightShift);
-        bool windows = Win32Helper.IsKeyDown((int)VirtualKey.LeftWindows) ||
-                       Win32Helper.IsKeyDown((int)VirtualKey.RightWindows);
-
-        return ctrl == modifiers.HasFlag(HotkeyModifierKeys.Control) &&
-               alt == modifiers.HasFlag(HotkeyModifierKeys.Alt) &&
-               shift == modifiers.HasFlag(HotkeyModifierKeys.Shift) &&
-               windows == modifiers.HasFlag(HotkeyModifierKeys.Windows);
-    }
-
     private static bool IsReservedHookDisabledByEnvironment()
     {
         string? value = Environment.GetEnvironmentVariable("DESKBOX_DISABLE_RESERVED_HOTKEY_HOOK");
@@ -648,7 +830,7 @@ public sealed class GlobalHotkeyService : IDisposable
         return virtualKey is >= (int)VirtualKey.F1 and <= (int)VirtualKey.F24;
     }
 
-    private static string FormatVirtualKey(int virtualKey)
+    internal static string FormatVirtualKey(int virtualKey)
     {
         if (virtualKey is >= (int)VirtualKey.A and <= (int)VirtualKey.Z)
         {

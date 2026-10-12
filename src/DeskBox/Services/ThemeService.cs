@@ -1,4 +1,5 @@
 using DeskBox.Helpers;
+using DeskBox.Platform;
 using Microsoft.UI.Xaml;
 using WinRT.Interop;
 using Windows.UI;
@@ -8,15 +9,16 @@ namespace DeskBox.Services;
 /// <summary>
 /// Manages application theme (Light/Dark/System) and accent color, and applies them to all windows.
 /// </summary>
-public sealed class ThemeService
+public sealed class ThemeService : IDisposable
 {
     public const string AccentModeSystem = "System";
     public const string AccentModeCustom = "Custom";
 
     private readonly SettingsService _settingsService;
-    private readonly List<Window> _trackedWindows = new();
+    private readonly WindowTrackingRegistry<Window> _trackedWindows = new();
     private readonly Windows.UI.ViewManagement.UISettings _uiSettings = new();
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _appearanceDebounceTimer;
+    private bool _disposed;
 
     public event Action? AppearanceChanged;
 
@@ -28,14 +30,23 @@ public sealed class ThemeService
 
     private void OnColorValuesChanged(Windows.UI.ViewManagement.UISettings sender, object args)
     {
-        App.UiDispatcherQueue?.TryEnqueue(() =>
+        if (_disposed) return;
+        var dispatcherQueue = App.UiDispatcherQueue;
+        if (dispatcherQueue is null)
         {
+            App.Log("[Theme] ColorValuesChanged dropped: UI dispatcher unavailable");
+            return;
+        }
+
+        dispatcherQueue.TryEnqueue(() =>
+        {
+            if (_disposed) return;
             if (_appearanceDebounceTimer is null)
             {
                 _appearanceDebounceTimer = App.UiDispatcherQueue.CreateTimer();
                 _appearanceDebounceTimer.Interval = TimeSpan.FromMilliseconds(200);
                 _appearanceDebounceTimer.IsRepeating = false;
-                _appearanceDebounceTimer.Tick += (_, _) => RefreshAppearance();
+                _appearanceDebounceTimer.Tick += OnAppearanceTimerTick;
             }
 
             _appearanceDebounceTimer.Stop();
@@ -52,6 +63,23 @@ public sealed class ThemeService
         "Dark" => ElementTheme.Dark,
         _ => ElementTheme.Default
     };
+
+    /// <summary>
+    /// The theme applied to window roots: the explicit override, or the
+    /// resolved system theme when following it. Themed lookups without an
+    /// element scope (for example a window that owns no tree yet) resolve
+    /// against this instead of the application theme, which tracks the system.
+    /// </summary>
+    public ElementTheme EffectiveTheme
+    {
+        get
+        {
+            var theme = CurrentTheme;
+            return theme == ElementTheme.Default
+                ? (Win32Helper.IsSystemDarkMode() ? ElementTheme.Dark : ElementTheme.Light)
+                : theme;
+        }
+    }
 
     public bool UsesSystemAccentColor =>
         !string.Equals(_settingsService.Settings.AccentColorMode, AccentModeCustom, StringComparison.OrdinalIgnoreCase);
@@ -125,17 +153,22 @@ public sealed class ThemeService
     }
 
     /// <summary>
-    /// Register a window so appearance changes are applied to it.
+    /// Register a window so appearance changes are applied to it. A window
+    /// leaves the registry only when its Closed event actually runs — a
+    /// cancelled close (hide-and-reuse) keeps it tracked.
     /// </summary>
     public void TrackWindow(Window window)
     {
-        if (_trackedWindows.Contains(window))
+        EnsureUiThread(nameof(TrackWindow));
+        if (!_trackedWindows.Track(window))
         {
             ApplyToWindow(window);
             return;
         }
 
-        _trackedWindows.Add(window);
+        App.LogVerbose(
+            $"[Theme] TrackWindow {window.GetType().Name} " +
+            $"tracked={_trackedWindows.TrackedCount}");
         ApplyToWindow(window);
         window.Closed += OnTrackedWindowClosed;
     }
@@ -148,7 +181,10 @@ public sealed class ThemeService
         }
 
         window.Closed -= OnTrackedWindowClosed;
-        _trackedWindows.Remove(window);
+        _trackedWindows.NotifyClosed(window);
+        App.LogVerbose(
+            $"[Theme] UntrackWindow {window.GetType().Name} " +
+            $"tracked={_trackedWindows.TrackedCount}");
     }
 
     /// <summary>
@@ -156,6 +192,7 @@ public sealed class ThemeService
     /// </summary>
     public void ApplyToWindow(Window window)
     {
+        if (_disposed) return;
         if (window.Content is not FrameworkElement rootElement)
         {
             return;
@@ -167,11 +204,7 @@ public sealed class ThemeService
             return;
         }
 
-        var theme = CurrentTheme;
-        if (theme == ElementTheme.Default)
-        {
-            theme = Win32Helper.IsSystemDarkMode() ? ElementTheme.Dark : ElementTheme.Light;
-        }
+        var theme = EffectiveTheme;
 
         rootElement.RequestedTheme = theme;
         AccentResourceScope.Apply(rootElement, GetEffectiveAccentColor());
@@ -182,14 +215,7 @@ public sealed class ThemeService
             return;
         }
 
-        bool isDark = theme switch
-        {
-            ElementTheme.Dark => true,
-            ElementTheme.Light => false,
-            _ => Win32Helper.IsSystemDarkMode()
-        };
-
-        Win32Helper.SetWindowTheme(hWnd, isDark);
+        Win32Helper.SetWindowTheme(hWnd, theme == ElementTheme.Dark);
     }
 
     /// <summary>
@@ -197,7 +223,9 @@ public sealed class ThemeService
     /// </summary>
     public void ApplyToAllWindows()
     {
-        foreach (var window in _trackedWindows)
+        if (_disposed) return;
+        EnsureUiThread(nameof(ApplyToAllWindows));
+        foreach (var window in _trackedWindows.EnumerateAlive())
         {
             ApplyToWindow(window);
         }
@@ -205,8 +233,39 @@ public sealed class ThemeService
 
     public void RefreshAppearance()
     {
+        if (_disposed) return;
+        App.LogVerbose($"[Theme] RefreshAppearance tracked={_trackedWindows.TrackedCount}");
         ApplyToAllWindows();
         AppearanceChanged?.Invoke();
         App.ScheduleLightMemoryCleanup();
+    }
+
+    private void OnAppearanceTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args) => RefreshAppearance();
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _uiSettings.ColorValuesChanged -= OnColorValuesChanged;
+        if (_appearanceDebounceTimer is not null)
+        {
+            _appearanceDebounceTimer.Tick -= OnAppearanceTimerTick;
+            _appearanceDebounceTimer.Stop();
+            _appearanceDebounceTimer = null;
+        }
+        foreach (Window window in _trackedWindows.EnumerateAlive())
+        {
+            window.Closed -= OnTrackedWindowClosed;
+            _trackedWindows.Untrack(window);
+        }
+        AppearanceChanged = null;
+    }
+
+    private static void EnsureUiThread(string operation)
+    {
+        if (App.UiDispatcherQueue is { HasThreadAccess: false })
+        {
+            App.Log($"[Theme] {operation} invoked off the UI thread");
+        }
     }
 }

@@ -75,6 +75,65 @@ public sealed class DeskBoxDiagnosticsBundleServiceTests : IDisposable
         Assert.DoesNotContain("S-1-5-18", sanitized, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("False", "True")]
+    [InlineData("True", "False")]
+    public void SanitizeLog_PreservesStartupChecksWhileRedactingActualPaths(
+        string pathCheck,
+        string executionLimitCheck)
+    {
+        string source =
+            "expectedPath='C:\\Private Folder\\DeskBox.exe' " +
+            "actualPath='C:\\Other Private Folder\\DeskBox.exe' " +
+            $"checks=taskName=True path={pathCheck} arguments=True " +
+            $"executionLimit={executionLimitCheck} restart=True";
+
+        string sanitized = DeskBoxDiagnosticsBundleService.SanitizeLog(source);
+
+        Assert.DoesNotContain("Private Folder", sanitized, StringComparison.Ordinal);
+        Assert.Contains("expectedPath=<REDACTED>", sanitized, StringComparison.Ordinal);
+        Assert.Contains("actualPath=<REDACTED>", sanitized, StringComparison.Ordinal);
+        Assert.Contains($"path={pathCheck}", sanitized, StringComparison.Ordinal);
+        Assert.Contains($"executionLimit={executionLimitCheck}", sanitized, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("True\\private.txt")]
+    [InlineData("'False/private.txt'")]
+    public void SanitizeLog_StillRedactsPathsBeginningWithBooleanText(string path)
+    {
+        string sanitized = DeskBoxDiagnosticsBundleService.SanitizeLog($"path={path} ready=True");
+
+        Assert.Equal("path=<REDACTED> ready=True", sanitized);
+    }
+
+    [Fact]
+    public void SanitizeLog_PreservesHResultHexValuesOnKeywordCollidingKeys()
+    {
+        string source =
+            "[OpenFile] backend=explorer-hosted implementation=IExplorerShellLaunch " +
+            "path='C:\\Users\\secret\\file.txt' applicationHr=0x00000000 executeHr=0x800704CF";
+
+        string sanitized = DeskBoxDiagnosticsBundleService.SanitizeLog(source);
+
+        Assert.Contains("applicationHr=0x00000000", sanitized, StringComparison.Ordinal);
+        Assert.Contains("executeHr=0x800704CF", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", sanitized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SanitizeLog_PreservesExecuteHResultWithTrailingPeriod()
+    {
+        string source =
+            "Native Explorer-shell launch failed: status=Failed, HRESULT=0x80004005, " +
+            "execute=0x80004005.";
+
+        string sanitized = DeskBoxDiagnosticsBundleService.SanitizeLog(source);
+
+        Assert.Contains("HRESULT=0x80004005", sanitized, StringComparison.Ordinal);
+        Assert.Contains("execute=0x80004005.", sanitized, StringComparison.Ordinal);
+    }
+
     private static DeskBoxDiagnosticSnapshot CreateSnapshot()
     {
         return new DeskBoxDiagnosticSnapshot(

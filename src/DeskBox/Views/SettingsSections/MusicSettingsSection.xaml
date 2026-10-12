@@ -17,6 +17,18 @@
 
     <StackPanel
         Style="{StaticResource SectionPanelStyle}">
+        <!-- Native InfoBar notice (same contract as the elevated-hotkey notice
+             on the interaction page): SMTC dependency guidance pinned at the
+             top of the music section. Styling is applied by the shell through
+             SettingsWindow.Navigation (FindCreatedSectionElement). -->
+        <InfoBar
+            x:Name="MusicSmtcNoticeInfoBar"
+            IsClosable="False"
+            IsIconVisible="True"
+            IsOpen="True"
+            Severity="Informational"
+            svc:Localized.DescriptionKey="Settings.Music.SmtcNotice.Description"
+            svc:Localized.HeaderKey="Settings.Music.SmtcNotice.Title" />
         <StackPanel Margin="0,8,0,0" Spacing="4">
             <toolkit:SettingsCard
                 HorizontalContentAlignment="Right"
@@ -26,9 +38,10 @@
                     <FontIcon Glyph="&#xE8B9;" />
                 </toolkit:SettingsCard.HeaderIcon>
                 <ComboBox
+                    svc:Localized.AutomationNameKey="Settings.Music.DisplayMode.Title"
                     MinWidth="{StaticResource SettingsControlMinWidth}"
-                    ItemsSource="{Binding AvailableMusicDisplayModeOptions}"
-                    controls:SettingsComboBox.Value="{Binding SelectedMusicDisplayMode, Mode=TwoWay}" />
+                    ItemsSource="{Binding AvailableDisplayModeOptions}"
+                    controls:SettingsComboBox.Value="{Binding DisplayMode, Mode=TwoWay}" />
             </toolkit:SettingsCard>
 
             <toolkit:SettingsCard
@@ -38,11 +51,11 @@
                 <toolkit:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xEB9F;" />
                 </toolkit:SettingsCard.HeaderIcon>
-                <ToggleSwitch
+                <ToggleSwitch svc:Localized.AutomationNameKey="Settings.Music.ArtworkBackdrop.Title"
                     OnContent=""
                     OffContent=""
                     MinWidth="0"
-                    IsOn="{Binding MusicUseArtworkBackdrop, Mode=TwoWay}" />
+                    IsOn="{Binding UseArtworkBackdrop, Mode=TwoWay}" />
             </toolkit:SettingsCard>
 
             <toolkit:SettingsCard
@@ -52,11 +65,11 @@
                 <toolkit:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7F8;" />
                 </toolkit:SettingsCard.HeaderIcon>
-                <ToggleSwitch
+                <ToggleSwitch svc:Localized.AutomationNameKey="Settings.Music.CoverHoverMotion.Title"
                     OnContent=""
                     OffContent=""
                     MinWidth="0"
-                    IsOn="{Binding MusicEnableCoverHoverMotion, Mode=TwoWay}" />
+                    IsOn="{Binding EnableCoverHoverMotion, Mode=TwoWay}" />
             </toolkit:SettingsCard>
         </StackPanel>
     </StackPanel>

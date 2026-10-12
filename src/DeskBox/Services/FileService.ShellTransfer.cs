@@ -1,3 +1,5 @@
+using DeskBox.Helpers;
+using DeskBox.Platform;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
@@ -17,6 +19,42 @@ public sealed partial class FileService
         new("947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8");
     private static readonly Guid s_shellItemInterfaceId =
         new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+    // Feedback 455: a wedged IFileOperation used to hang its dedicated STA
+    // thread forever — the import card stayed pending and only killing the
+    // process recovered. The watchdog below declares the transfer dead only
+    // after no Shell progress for the whole inactivity window (every progress
+    // sink callback renews it), then abandons the unabortable thread and
+    // returns a retryable failure. Bounded admission also stops repeated
+    // wedged imports from piling up zombie threads without any backpressure.
+    private static readonly BoundedStaOperationRunner s_shellTransferRunner =
+        new(
+            maxConcurrency: 4,
+            maxQueued: 8,
+            queueTimeout: TimeSpan.FromSeconds(10),
+            threadName: "DeskBox Windows File Operation",
+            coInitializationFlags: (int)CoInitApartmentThreaded);
+
+    /// <summary>
+    /// Inactivity budget for user-driven shell transfers (drag-in import,
+    /// elevated drop). A healthy interactive transfer finishes in ~300ms; a
+    /// legitimate large one keeps the sink talking, so prolonged total
+    /// silence is the verdict "wedged", not "slow". The budget stays well
+    /// above the documented UpdateProgress cadence for an actively copying
+    /// item so slow media (single large file on a lagging disk) is never
+    /// falsely abandoned — a wrong abandonment risks a duplicate file once
+    /// the zombie transfer still completes and the user retries.
+    /// </summary>
+    private static readonly TimeSpan InteractiveShellTransferInactivityTimeout =
+        TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Reserved tier for headless bulk transfers: none exist on this engine
+    /// today (background batches run the managed engine), the constant keeps
+    /// the interactive/headless split explicit if one is added.
+    /// </summary>
+    private static readonly TimeSpan HeadlessShellTransferInactivityTimeout =
+        TimeSpan.FromSeconds(60);
 
     private async Task<IReadOnlyList<FileTransferResult>>
         ExecuteModernShellTransferPlanAsync(
@@ -74,6 +112,20 @@ public sealed partial class FileService
                 FileTransferPhase.Canceled,
                 operations.Count,
                 completedItems: 0));
+            throw;
+        }
+        catch (StaOperationAbandonedException)
+        {
+            progress?.Report(CreateShellProgress(
+                FileTransferPhase.Failed,
+                operations.Count,
+                completedItems: 0));
+            App.Log(
+                $"[FileTransfer] Windows shell transfer abandoned by the " +
+                $"watchdog count={operations.Count} move={move} " +
+                $"owner=0x{ownerWindowHandle.ToInt64():X} " +
+                $"elapsedMs={stopwatch.ElapsedMilliseconds}; reported as a " +
+                $"retryable failure so the import cannot stay pending.");
             throw;
         }
         catch
@@ -236,7 +288,7 @@ public sealed partial class FileService
                Directory.Exists(destinationPath);
     }
 
-    private static Task<ShellTransferOutcome> RunShellTransferOnStaThreadAsync(
+    private static async Task<ShellTransferOutcome> RunShellTransferOnStaThreadAsync(
         IReadOnlyList<TransferOperation> operations,
         bool move,
         IntPtr ownerWindowHandle,
@@ -244,34 +296,35 @@ public sealed partial class FileService
         bool keepBoth,
         Action<FileTransferResult>? itemCompleted)
     {
-        var completion = new TaskCompletionSource<ShellTransferOutcome>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                completion.TrySetResult(ExecuteShellTransferOnCurrentThread(
+        // Interactive by construction: every caller of the modern Shell
+        // engine is a user-driven transfer with an owner window.
+        var watchdog = new StaOperationWatchdog(
+            InteractiveShellTransferInactivityTimeout);
+        StaOperationResult<ShellTransferOutcome> result =
+            await s_shellTransferRunner.RunAsync(
+                () => ExecuteShellTransferOnCurrentThread(
                     operations,
                     move,
                     ownerWindowHandle,
-                    cancellationToken, keepBoth, itemCompleted));
-            }
-            catch (OperationCanceledException ex)
-            {
-                completion.TrySetCanceled(ex.CancellationToken);
-            }
-            catch (Exception ex)
-            {
-                completion.TrySetException(ex);
-            }
-        })
+                    cancellationToken,
+                    keepBoth,
+                    itemCompleted,
+                    watchdog),
+                cancellationToken,
+                watchdog).ConfigureAwait(false);
+        if (!result.Started)
         {
-            IsBackground = true,
-            Name = "DeskBox Windows File Operation"
-        };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        return completion.Task;
+            // Admission or queue timeout: nothing ran, nothing completed.
+            // Retryable by the user once the in-flight transfers drain.
+            throw new FileTransferPartialFailureException(
+                [],
+                new IOException(
+                    "The Windows file operation engine was busy; the " +
+                    "transfer was not started (queueWaitMs=" +
+                    $"{(long)result.QueueWait.TotalMilliseconds})."));
+        }
+
+        return result.Value!;
     }
 
     private static ShellTransferOutcome ExecuteShellTransferOnCurrentThread(
@@ -280,10 +333,11 @@ public sealed partial class FileService
         IntPtr ownerWindowHandle,
         CancellationToken cancellationToken,
         bool keepBoth,
-        Action<FileTransferResult>? itemCompleted)
+        Action<FileTransferResult>? itemCompleted,
+        StaOperationWatchdog watchdog)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        int initializeResult = CoInitializeEx(
+        int initializeResult = FileOperationNativeMethods.CoInitializeEx(
             IntPtr.Zero,
             CoInitApartmentThreaded);
         ThrowForShellHResult(initializeResult, cancellationToken);
@@ -293,13 +347,13 @@ public sealed partial class FileService
         uint adviseCookie = 0;
         var sink = new ShellFileOperationProgressSink(
             operations,
-            cancellationToken, itemCompleted, move);
+            cancellationToken, itemCompleted, move, watchdog);
         try
         {
             Guid classId = s_fileOperationClassId;
             Guid interfaceId = s_fileOperationInterfaceId;
             ThrowForShellHResult(
-                CoCreateInstance(
+                FileOperationNativeMethods.CoCreateInstance(
                     ref classId,
                     IntPtr.Zero,
                     ClsContextInProcessServer,
@@ -311,6 +365,9 @@ public sealed partial class FileService
             ThrowForShellHResult(
                 fileOperation.Advise(sink, out adviseCookie),
                 cancellationToken);
+            // Staging is progress too: slow Shell item creation (network
+            // paths, offline shells) must keep the watchdog calm.
+            watchdog.Pulse();
             ThrowForShellHResult(
                 fileOperation.SetOperationFlags(
                     ShellFileOperationNoConfirmMakeDirectory |
@@ -348,8 +405,10 @@ public sealed partial class FileService
                         destinationName,
                         IntPtr.Zero);
                 ThrowForShellHResult(queueResult, cancellationToken);
+                watchdog.Pulse();
             }
 
+            watchdog.Pulse();
             int performResult = fileOperation.PerformOperations();
             int abortedResult = fileOperation.GetAnyOperationsAborted(
                 out bool aborted);
@@ -392,7 +451,7 @@ public sealed partial class FileService
             GC.KeepAlive(sink);
             if (uninitialize)
             {
-                CoUninitialize();
+                FileOperationNativeMethods.CoUninitialize();
             }
         }
     }
@@ -403,7 +462,7 @@ public sealed partial class FileService
     {
         Guid interfaceId = s_shellItemInterfaceId;
         ThrowForShellHResult(
-            SHCreateItemFromParsingName(
+            FileOperationNativeMethods.SHCreateItemFromParsingName(
                 path,
                 IntPtr.Zero,
                 ref interfaceId,
@@ -455,7 +514,7 @@ public sealed partial class FileService
         {
             if (pathPointer != IntPtr.Zero)
             {
-                CoTaskMemFree(pathPointer);
+                FileOperationNativeMethods.CoTaskMemFree(pathPointer);
             }
         }
     }
@@ -476,6 +535,7 @@ public sealed partial class FileService
         private readonly IReadOnlyList<TransferOperation> _operations;
         private readonly CancellationToken _cancellationToken;
         private readonly Action<FileTransferResult>? _itemCompleted;
+        private readonly StaOperationWatchdog? _watchdog;
         private int _receiptError;
         private readonly bool _move;
         private readonly Dictionary<string, FileTransferResult> _completed =
@@ -485,12 +545,14 @@ public sealed partial class FileService
             IReadOnlyList<TransferOperation> operations,
             CancellationToken cancellationToken,
             Action<FileTransferResult>? itemCompleted,
-            bool move)
+            bool move,
+            StaOperationWatchdog? watchdog = null)
         {
             _move = move;
             _itemCompleted = itemCompleted;
             _operations = operations;
             _cancellationToken = cancellationToken;
+            _watchdog = watchdog;
         }
 
         internal int FinishHResult { get; private set; }
@@ -508,10 +570,20 @@ public sealed partial class FileService
                 .ToArray();
         }
 
-        public int StartOperations() => CancellationResult();
+        // Every Shell callback is observable progress: it renews the
+        // watchdog so a legitimate minute-level transfer is never mistaken
+        // for the wedged state of feedback 455.
+        private void Pulse() => _watchdog?.Pulse();
+
+        public int StartOperations()
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int FinishOperations(int result)
         {
+            Pulse();
             FinishHResult = result;
             return SuccessHResult;
         }
@@ -519,20 +591,32 @@ public sealed partial class FileService
         public int PreRenameItem(
             uint flags,
             IntPtr item,
-            IntPtr newName) => CancellationResult();
+            IntPtr newName)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int PostRenameItem(
             uint flags,
             IntPtr item,
             IntPtr newName,
             int renameResult,
-            IntPtr newlyCreatedItem) => SuccessHResult;
+            IntPtr newlyCreatedItem)
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
         public int PreMoveItem(
             uint flags,
             IntPtr item,
             IntPtr destinationFolder,
-            IntPtr newName) => CancellationResult();
+            IntPtr newName)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int PostMoveItem(
             uint flags,
@@ -542,6 +626,7 @@ public sealed partial class FileService
             int moveResult,
             IntPtr newlyCreatedItem)
         {
+            Pulse();
             RecordTransferResult(item, newlyCreatedItem, moveResult);
             return CancellationResult();
         }
@@ -550,7 +635,11 @@ public sealed partial class FileService
             uint flags,
             IntPtr item,
             IntPtr destinationFolder,
-            IntPtr newName) => CancellationResult();
+            IntPtr newName)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int PostCopyItem(
             uint flags,
@@ -560,23 +649,35 @@ public sealed partial class FileService
             int copyResult,
             IntPtr newlyCreatedItem)
         {
+            Pulse();
             RecordTransferResult(item, newlyCreatedItem, copyResult);
             return CancellationResult();
         }
 
-        public int PreDeleteItem(uint flags, IntPtr item) =>
-            CancellationResult();
+        public int PreDeleteItem(uint flags, IntPtr item)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int PostDeleteItem(
             uint flags,
             IntPtr item,
             int deleteResult,
-            IntPtr newlyCreatedItem) => SuccessHResult;
+            IntPtr newlyCreatedItem)
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
         public int PreNewItem(
             uint flags,
             IntPtr destinationFolder,
-            IntPtr newName) => CancellationResult();
+            IntPtr newName)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
         public int PostNewItem(
             uint flags,
@@ -585,16 +686,35 @@ public sealed partial class FileService
             IntPtr templateName,
             uint fileAttributes,
             int newItemResult,
-            IntPtr newItem) => SuccessHResult;
+            IntPtr newItem)
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
-        public int UpdateProgress(uint totalWork, uint completedWork) =>
-            CancellationResult();
+        public int UpdateProgress(uint totalWork, uint completedWork)
+        {
+            Pulse();
+            return CancellationResult();
+        }
 
-        public int ResetTimer() => SuccessHResult;
+        public int ResetTimer()
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
-        public int PauseTimer() => SuccessHResult;
+        public int PauseTimer()
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
-        public int ResumeTimer() => SuccessHResult;
+        public int ResumeTimer()
+        {
+            Pulse();
+            return SuccessHResult;
+        }
 
         private int CancellationResult()
         {
@@ -799,14 +919,6 @@ public sealed partial class FileService
         }
     }
 
-    [LibraryImport("ole32.dll")]
-    private static partial int CoInitializeEx(IntPtr reserved, uint coInitialize);
-    [LibraryImport("ole32.dll")]
-    private static partial void CoUninitialize();
-    [LibraryImport("ole32.dll")]
-    private static partial int CoCreateInstance(ref Guid classId, IntPtr outerUnknown, uint classContext, ref Guid interfaceId, out IntPtr fileOperation);
-    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
-    private static partial int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid interfaceId, out IntPtr shellItem);
-    [LibraryImport("ole32.dll")]
-    private static partial void CoTaskMemFree(IntPtr memory);
+    // ole32/shell32 COM entry points live in
+    // DeskBox.Platform.FileOperationNativeMethods.
 }

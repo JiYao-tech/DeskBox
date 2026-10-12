@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 
 namespace DeskBox.Tests;
 
@@ -27,12 +27,12 @@ public sealed class AotStage4D1BContractTests
         Assert.Contains("using CommunityToolkit.WinUI.Controls;", source, StringComparison.Ordinal);
         Assert.Matches(
             new Regex(
-                @"case SettingsCard (?<name>\w+):\s*\k<name>\.Header = value;",
+                @"case SettingsCard (?<name>\w+):\s*\k<name>\.Header = InfoTip\.TryCreateHeaderContent\(\k<name>, value\) \?\? value;",
                 RegexOptions.CultureInvariant),
             source);
         Assert.Matches(
             new Regex(
-                @"case SettingsExpander (?<name>\w+):\s*\k<name>\.Header = value;",
+                @"case SettingsExpander (?<name>\w+):\s*\k<name>\.Header = InfoTip\.TryCreateHeaderContent\(\k<name>, value\) \?\? value;",
                 RegexOptions.CultureInvariant),
             source);
         Assert.Matches(
@@ -56,20 +56,24 @@ public sealed class AotStage4D1BContractTests
         // Combos such as Grid|HeaderKey or StackPanel|HeaderKey are intentional
         // search-catalog markers (indexed by update-settings-search-catalog.ps1);
         // Localized.cs deliberately ignores them at runtime because those
-        // containers have no Header/Description property.
+        // containers have no Header/Description property. InfoBar carries the
+        // native notice Title/Message properties for the notice cards.
         IReadOnlyDictionary<string, int> usages = ReadLocalizedXamlUsages();
-        Assert.Equal(10, usages.Count);
-        Assert.Equal(171, usages["toolkit:SettingsCard|HeaderKey"]);
-        Assert.Equal(143, usages["toolkit:SettingsCard|DescriptionKey"]);
-        Assert.Equal(20, usages["toolkit:SettingsExpander|HeaderKey"]);
-        Assert.Equal(7, usages["toolkit:SettingsExpander|DescriptionKey"]);
+        Assert.Equal(7, usages.Count);
+        // Upstream's 217/185 assumed SettingsWindow.xaml still carried the music
+        // section inline. The merged tree extracts it into
+        // Views/SettingsSections/MusicSettingsSection.xaml (same cards, same
+        // keys, still under src/DeskBox so the totals are unaffected) and adds
+        // the fork's Settings.WidgetSnap.GridSize card next to upstream's
+        // Spacing card, which is the +1 HeaderKey / +1 DescriptionKey here.
+        Assert.Equal(218, usages["toolkit:SettingsCard|HeaderKey"]);
+        Assert.Equal(186, usages["toolkit:SettingsCard|DescriptionKey"]);
+        Assert.Equal(35, usages["toolkit:SettingsExpander|HeaderKey"]);
+        Assert.Equal(21, usages["toolkit:SettingsExpander|DescriptionKey"]);
         Assert.Equal(2, usages["TextBox|HeaderKey"]);
-        Assert.Equal(2, usages["Grid|HeaderKey"]);
-        Assert.Equal(1, usages["Grid|DescriptionKey"]);
-        Assert.Equal(1, usages["StackPanel|HeaderKey"]);
-        Assert.Equal(1, usages["Expander|HeaderKey"]);
-        Assert.Equal(1, usages["Expander|DescriptionKey"]);
-        Assert.Equal(349, usages.Values.Sum());
+        Assert.Equal(6, usages["InfoBar|HeaderKey"]);
+        Assert.Equal(6, usages["InfoBar|DescriptionKey"]);
+        Assert.Equal(474, usages.Values.Sum());
     }
 
     [Fact]
@@ -77,7 +81,7 @@ public sealed class AotStage4D1BContractTests
     {
         string script = ReadRepositoryFile("scripts/publish-aot-audit.ps1");
 
-        Assert.Contains("$auditProfileVersion = 63", script, StringComparison.Ordinal);
+        Assert.Contains("$auditProfileVersion = 64", script, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", script, StringComparison.Ordinal);
         Assert.Contains("stage4D1BWarningMessages", script, StringComparison.Ordinal);
         Assert.Contains("QuickCaptureSurfaceContent.xaml.cs", script, StringComparison.Ordinal);
@@ -90,6 +94,8 @@ public sealed class AotStage4D1BContractTests
 
     private static IReadOnlyDictionary<string, int> ReadLocalizedXamlUsages()
     {
+        string projectDirectory = TestPaths.FromRepository("src/DeskBox");
+        string separator = Path.DirectorySeparatorChar.ToString();
         var tagRegex = new Regex(
             @"<(?<tag>[A-Za-z_][A-Za-z0-9_.:-]*)\b(?:(?!>).)*svc:Localized\.(?:HeaderKey|DescriptionKey)(?:(?!>).)*>",
             RegexOptions.CultureInvariant | RegexOptions.Singleline);
@@ -98,8 +104,17 @@ public sealed class AotStage4D1BContractTests
             RegexOptions.CultureInvariant);
         var usages = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        foreach (string path in TestPaths.EnumerateProductionXamlFiles())
+        foreach (string path in Directory.EnumerateFiles(
+                     projectDirectory,
+                     "*.xaml",
+                     SearchOption.AllDirectories))
         {
+            if (path.Contains($"{separator}bin{separator}", StringComparison.OrdinalIgnoreCase) ||
+                path.Contains($"{separator}obj{separator}", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             string xaml = File.ReadAllText(path);
             foreach (Match tagMatch in tagRegex.Matches(xaml))
             {

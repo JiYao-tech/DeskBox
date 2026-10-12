@@ -1,5 +1,6 @@
 using DeskBox.Helpers;
 using DeskBox.Services;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -40,50 +41,86 @@ public abstract partial class WidgetWindowBase
         ApplyWidgetForegroundAppearance();
     }
 
-    protected async Task ShowWidgetForegroundColorPickerAsync()
+    /// <summary>
+    /// Builds the custom-foreground-color picker as an anchored flyout. The
+    /// window decides where to show it; a ContentDialog inside a small widget
+    /// window gets clipped by the window bounds, while a flyout follows the
+    /// same escape-the-window placement the widget context menus use.
+    /// </summary>
+    protected Flyout BuildWidgetForegroundColorPickerFlyout()
     {
-        if (RootElement.XamlRoot is null)
-        {
-            return;
-        }
-
         var picker = new ColorPicker
         {
             Color = WidgetForegroundSettings.ResolveCustomColor(
                 Config,
                 SettingsService.Settings),
             IsAlphaEnabled = false,
-            MinWidth = 340
+            MinWidth = 256
         };
         var localization = App.Current.LocalizationService;
-        var dialog = new ContentDialog
+        var saveButton = new Button
         {
-            XamlRoot = RootElement.XamlRoot,
-            Title = localization.T("Widget.Foreground.CustomColor"),
-            Content = picker,
-            PrimaryButtonText = localization.T("Common.Save"),
-            CloseButtonText = localization.T("Common.Cancel"),
-            DefaultButton = ContentDialogButton.Primary
+            Content = localization.T("Common.Save"),
+            MinWidth = 96
         };
-
-        try
+        var cancelButton = new Button
         {
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+            Content = localization.T("Common.Cancel"),
+            MinWidth = 96
+        };
+        var flyout = new Flyout
+        {
+            ShouldConstrainToRootBounds = false,
+            Content = new StackPanel
             {
-                return;
+                Spacing = 12,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = localization.T("Widget.Foreground.CustomColor"),
+                        FontWeight = FontWeights.SemiBold
+                    },
+                    new TextBlock
+                    {
+                        Text = localization.T("Widget.Foreground.ContrastHint"),
+                        FontSize = 11,
+                        Opacity = 0.7,
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    picker,
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        Spacing = 8,
+                        Children = { cancelButton, saveButton }
+                    }
+                }
             }
-
-            WidgetForegroundSettings.SetCustomColorOverride(Config, picker.Color);
-            WidgetForegroundSettings.SetModeOverride(
-                Config,
-                WidgetForegroundSettings.ModeCustom);
-            SettingsService.UpdateWidget(Config);
-            ApplyWidgetForegroundAppearance();
-        }
-        catch (Exception ex)
+        };
+        cancelButton.Click += (_, _) => flyout.Hide();
+        saveButton.Click += (_, _) =>
         {
-            App.Log($"[WidgetForeground] Color picker failed: {ex.Message}");
-        }
+            try
+            {
+                WidgetForegroundSettings.SetCustomColorOverride(Config, picker.Color);
+                WidgetForegroundSettings.SetModeOverride(
+                    Config,
+                    WidgetForegroundSettings.ModeCustom);
+                SettingsService.UpdateWidget(Config);
+                ApplyWidgetForegroundAppearance();
+            }
+            catch (Exception ex)
+            {
+                App.Log($"[WidgetForeground] Color picker failed: {ex.Message}");
+            }
+            finally
+            {
+                flyout.Hide();
+            }
+        };
+        return flyout;
     }
 
     private void EnsureForegroundAccessibilityWatcher()
@@ -127,21 +164,24 @@ public abstract partial class WidgetWindowBase
 
     private void ApplyForegroundBrushes(WidgetForegroundPalette palette)
     {
+        // The drag handle renders over widget content without a plate behind
+        // it, so a translucent tone shows the content through the bar. It
+        // follows the full-opacity primary tone instead of the tertiary one.
         SetBrushColor(palette.Primary,
             "TextFillColorPrimaryBrush",
             "ControlStrongFillColorDefaultBrush",
             "ButtonForeground",
             "ButtonForegroundPointerOver",
             "SubtleButtonForeground",
-            "SubtleButtonForegroundPointerOver");
+            "SubtleButtonForegroundPointerOver",
+            "WidgetDragHandleBrush");
         SetBrushColor(palette.Secondary,
             "TextFillColorSecondaryBrush",
             "ControlStrongStrokeColorDefaultBrush",
             "ButtonForegroundPressed",
             "SubtleButtonForegroundPressed");
         SetBrushColor(palette.Tertiary,
-            "TextFillColorTertiaryBrush",
-            "WidgetDragHandleBrush");
+            "TextFillColorTertiaryBrush");
         SetBrushColor(palette.Disabled,
             "TextFillColorDisabledBrush",
             "ControlStrongFillColorDisabledBrush",
@@ -171,22 +211,23 @@ public abstract partial class WidgetWindowBase
     {
         if (highContrast)
         {
-            try
+            // Reuse the shared cached UISettings instance instead of a new
+            // projection per palette resolve; TryGetUiColor already carries
+            // the unavailability fallback contract.
+            Color? foreground = WindowsCompatibilityService.TryGetUiColor(
+                UIColorType.Foreground);
+            if (foreground is { } highContrastForeground)
             {
-                var uiSettings = new UISettings();
-                Color foreground = uiSettings.GetColorValue(UIColorType.Foreground);
                 return new WidgetForegroundPalette(
-                    foreground,
-                    foreground,
-                    foreground,
-                    foreground,
-                    foreground);
+                    highContrastForeground,
+                    highContrastForeground,
+                    highContrastForeground,
+                    highContrastForeground,
+                    highContrastForeground);
             }
-            catch
-            {
-                // Continue with the selected palette if WinRT accessibility
-                // colors are temporarily unavailable.
-            }
+
+            // Continue with the selected palette if WinRT accessibility
+            // colors are temporarily unavailable.
         }
 
         Color primary = mode switch

@@ -9,8 +9,6 @@ public sealed class WidgetCoordinatedMoveContractTests
         string manager = Read("src/DeskBox/Services/WidgetManager.CoordinatedMove.cs");
         string contentInteraction = Read(
             "src/DeskBox/Views/ContentWidgetWindow.WindowInteraction.cs");
-        string quickCaptureInteraction = Read(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.WindowInteraction.cs");
 
         Assert.Contains("VirtualKey.Control", interaction, StringComparison.Ordinal);
         Assert.Contains("TryBeginCoordinatedMove(HWnd)", interaction, StringComparison.Ordinal);
@@ -33,10 +31,6 @@ public sealed class WidgetCoordinatedMoveContractTests
             "!Win32Helper.IsKeyPressed(Windows.System.VirtualKey.Control)",
             contentInteraction,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "!Win32Helper.IsKeyPressed(Windows.System.VirtualKey.Control)",
-            quickCaptureInteraction,
-            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -56,7 +50,7 @@ public sealed class WidgetCoordinatedMoveContractTests
 
         Assert.Contains("<Slider", card, StringComparison.Ordinal);
         Assert.Contains("StepFrequency=\"1\"", card, StringComparison.Ordinal);
-        Assert.Contains("WidgetSnapSpacingText", card, StringComparison.Ordinal);
+        Assert.Contains("SnapSpacingText", card, StringComparison.Ordinal);
         Assert.DoesNotContain("<NumberBox", card, StringComparison.Ordinal);
     }
 
@@ -75,10 +69,14 @@ public sealed class WidgetCoordinatedMoveContractTests
         Assert.True(end > start);
         string card = settingsXaml[start..end];
 
+        // Merge note: the wired settings section editors drop the legacy
+        // Widget/Music prefixes (the section-level DataContext switch makes
+        // them redundant), so the merged card binds SnapGridSizeText /
+        // SnapGridSize instead of the fork's WidgetSnapGridSize* names.
         Assert.Contains("<Slider", card, StringComparison.Ordinal);
         Assert.Contains("StepFrequency=\"1\"", card, StringComparison.Ordinal);
-        Assert.Contains("WidgetSnapGridSizeText", card, StringComparison.Ordinal);
-        Assert.Contains("Value=\"{Binding WidgetSnapGridSize, Mode=TwoWay}\"", card, StringComparison.Ordinal);
+        Assert.Contains("SnapGridSizeText", card, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{Binding SnapGridSize, Mode=TwoWay}\"", card, StringComparison.Ordinal);
         Assert.DoesNotContain("<NumberBox", card, StringComparison.Ordinal);
     }
 
@@ -119,8 +117,13 @@ public sealed class WidgetCoordinatedMoveContractTests
             "ResizeGuideOverlay.SnapGridSizeDips = SettingsService.Settings.WidgetSnapGridSize;",
             Read("src/DeskBox/App.xaml.cs"),
             StringComparison.Ordinal);
+        // Merge note: upstream's shell hosts the interaction editor as a
+        // section VM, so the slider change arrives as the VM's
+        // SnapGridSizeUserChanged event and the shell handler assigns the
+        // overlay directly; normalization lives in the coordinator and again
+        // at the overlay's own use site.
         Assert.Contains(
-            "app.ResizeGuideOverlay.SnapGridSizeDips = normalized;",
+            "app.ResizeGuideOverlay.SnapGridSizeDips = value;",
             Read("src/DeskBox/ViewModels/SettingsViewModel.PreferenceCallbacks.cs"),
             StringComparison.Ordinal);
     }

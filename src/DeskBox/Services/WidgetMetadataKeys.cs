@@ -21,7 +21,7 @@ namespace DeskBox.Services;
 /// permanent global feature registry. It must SHRINK over time - host-owned
 /// keys stay, feature-owned keys move to per-kind stores / instance payloads,
 /// third-party plugins own their payload schemas outright and never register
-/// here. If this file grows past the current 19 entries, treat that as
+/// here. If this file grows past the current 18 entries, treat that as
 /// architecture regression, not progress.
 /// </summary>
 public static class WidgetMetadataKeys
@@ -34,7 +34,11 @@ public static class WidgetMetadataKeys
     // Foreground text overrides (host-owned)
     public const string WidgetForegroundMode = WidgetForegroundSettings.ModeOverrideMetadataKey;
     public const string WidgetForegroundColor = WidgetForegroundSettings.ColorOverrideMetadataKey;
-    public const string WidgetTextEdgeMode = WidgetForegroundSettings.EdgeOverrideMetadataKey;
+    // Upstream 1.5.x retired the per-widget text-edge override and replaced it
+    // with the dual-layer text shadow (Helpers/WidgetTextShadow.cs, migration
+    // v11). The fork still shipped the edge override at the merge base, so its
+    // WidgetTextEdgeMode alias is dropped here to match the retired feature;
+    // WidgetForegroundContractTests pins that nothing brings it back.
 
     // File stack overrides (File-widget owned)
     public const string FileStacksEnabled = WidgetFileStackSettings.EnabledOverrideMetadataKey;

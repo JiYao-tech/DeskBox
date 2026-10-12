@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 using DeskBox.Helpers;
 using DeskBox.Services;
@@ -144,7 +144,7 @@ public sealed class MusicVolumeAotContractTests
         string script = File.ReadAllText(
             TestPaths.FromRepository("scripts/publish-aot-audit.ps1"));
 
-        Assert.Contains("auditProfileVersion = 63", script, StringComparison.Ordinal);
+        Assert.Contains("auditProfileVersion = 64", script, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", script, StringComparison.Ordinal);
         Assert.Contains("musicVolumeAlwaysThrowMessages", script, StringComparison.Ordinal);
         Assert.Contains("musicVolumeBackendPolicy", script, StringComparison.Ordinal);

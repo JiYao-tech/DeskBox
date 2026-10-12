@@ -9,15 +9,30 @@ public sealed class WidgetGroupCloseConfirmationContractTests
             "src/DeskBox/Views/ContentWidgetWindow.Commands.cs"));
 
         Assert.Equal(
-            2,
+            6,
             CountOccurrences(
                 source,
                 "AcquireCloseWidgetFlyoutHandoff();"));
+        // The fourth acquire is the foreground color picker chain, the fifth
+        // is the title-icon customizer chain, and the sixth is the background
+        // customizer chain; all hold the same handoff across the
+        // menu-to-flyout transition.
         Assert.Equal(
             2,
             CountOccurrences(
                 source,
                 "closeWidgetFlyoutHandoff);"));
+        // The recycle-bin confirmation is a third flyout hop after the
+        // close-mode selection; it must hold the same interaction handoff
+        // or a Smart capsule collapses before it becomes visible.
+        Assert.Contains(
+            "recycleConfirmationHandoff ??= AcquireCloseWidgetFlyoutHandoff();",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "() => ShowDeleteManagedFolderConfirmationAsync());",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -36,10 +51,12 @@ public sealed class WidgetGroupCloseConfirmationContractTests
 
         Assert.Contains("BeginCompactInteraction();", acquire, StringComparison.Ordinal);
         Assert.Contains("BeginWidgetInteraction(", acquire, StringComparison.Ordinal);
-        Assert.Contains("ShowCloseWidgetFlyout(ContentWidgetShell);", queue, StringComparison.Ordinal);
+        Assert.Contains("ShowCloseWidgetFlyout(ContentWidgetShell)", queue, StringComparison.Ordinal);
         Assert.Contains("interactionHandoff?.Dispose();", queue, StringComparison.Ordinal);
+        // The queued show is awaited so the confirmation acquires its own
+        // interaction before the handoff is released.
         Assert.True(
-            queue.IndexOf("ShowCloseWidgetFlyout(ContentWidgetShell);", StringComparison.Ordinal) <
+            queue.IndexOf("await showAsync();", StringComparison.Ordinal) <
             queue.IndexOf("interactionHandoff?.Dispose();", StringComparison.Ordinal));
         Assert.Contains("owner.EndCompactInteraction();", source, StringComparison.Ordinal);
         Assert.Contains("widgetManager?.EndWidgetInteraction(", source, StringComparison.Ordinal);

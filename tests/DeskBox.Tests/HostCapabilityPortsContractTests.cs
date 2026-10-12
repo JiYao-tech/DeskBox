@@ -104,8 +104,12 @@ public sealed class HostCapabilityPortsContractTests
     public void Stage3B_CallersDependOnPortsNotManagerInternals()
     {
         string app = File.ReadAllText(TestPaths.SourceFile("src/DeskBox/App.xaml.cs"));
+        // The import menu lives on the live Quick Capture surface. Upstream
+        // 1.5.6 deleted the dead QuickCaptureWidgetWindow family that used to
+        // hold the first wired copy; the port contract is unchanged and is now
+        // pinned where the user actually reaches it.
         string menus = File.ReadAllText(TestPaths.SourceFile(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.Menus.cs"));
+            "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml.cs"));
         string featureWidgets = File.ReadAllText(TestPaths.SourceFile(
             "src/DeskBox/Services/WidgetManager.FeatureWidgets.cs"));
         string manager = File.ReadAllText(TestPaths.SourceFile(

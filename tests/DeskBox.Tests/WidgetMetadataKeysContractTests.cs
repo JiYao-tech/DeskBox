@@ -23,7 +23,11 @@ public sealed class WidgetMetadataKeysContractTests
             "FolderOpenBehavior = FileWidgetFolderOpenBehaviorNames.MetadataKey",
             "WidgetForegroundMode = WidgetForegroundSettings.ModeOverrideMetadataKey",
             "WidgetForegroundColor = WidgetForegroundSettings.ColorOverrideMetadataKey",
-            "WidgetTextEdgeMode = WidgetForegroundSettings.EdgeOverrideMetadataKey",
+            // WidgetTextEdgeMode is intentionally absent: upstream 1.5.x
+            // retired the per-widget text-edge override in favour of the
+            // dual-layer text shadow, so the fork's alias no longer has a
+            // source constant (WidgetForegroundContractTests pins the
+            // retirement on the foreground side).
             "FileStacksEnabled = WidgetFileStackSettings.EnabledOverrideMetadataKey",
             "FileStackGroupBy = WidgetFileStackSettings.GroupByOverrideMetadataKey",
             "FileStackThreshold = WidgetFileStackSettings.ThresholdOverrideMetadataKey",
@@ -44,19 +48,18 @@ public sealed class WidgetMetadataKeysContractTests
             Assert.Contains(alias, registry, StringComparison.Ordinal);
         }
 
-        Assert.Equal(19, requiredAliases.Length);
+        Assert.Equal(18, requiredAliases.Length);
     }
 
     [Fact]
     public void QuickCaptureMasterPaneWidth_DeclaredExactlyOnce()
     {
-        // The literal used to be declared privately in both
-        // QuickCaptureSurfaceContent and the dead QuickCaptureWidgetWindow;
-        // both now consume the registry constant.
+        // The literal used to be declared privately in both surfaces; the
+        // only remaining consumer is the live surface (the dead
+        // QuickCaptureWidgetWindow family was deleted upstream in 1.5.6).
         string[] consumers =
         [
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml.cs",
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.ResponsiveDetail.cs",
         ];
 
         foreach (string consumer in consumers)
@@ -71,5 +74,10 @@ public sealed class WidgetMetadataKeysContractTests
                 source,
                 StringComparison.Ordinal);
         }
+
+        Assert.False(
+            File.Exists(TestPaths.FromRepository(
+                "src/DeskBox/Views/QuickCaptureWidgetWindow.ResponsiveDetail.cs")),
+            "The dead QuickCaptureWidgetWindow family must stay deleted.");
     }
 }

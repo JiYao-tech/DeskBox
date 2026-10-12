@@ -1,10 +1,10 @@
 using DeskBox.Helpers;
+using DeskBox.Platform;
 using DeskBox.Services;
 using DeskBox.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Windows.Storage.Pickers;
-using WinRT.Interop;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace DeskBox.Views;
 
@@ -111,9 +111,14 @@ public sealed partial class SettingsWindow
 
             if (await dialog.ShowAsync() == ContentDialogResult.Primary)
             {
-                if (DragDropPermissionService.TryRelaunchAsExplorerUser())
+                if (DragDropPermissionService.TryRelaunchAsExplorerUser(
+                        $"--await-parent-exit {Environment.ProcessId}"))
                 {
-                    App.Current.Exit();
+                    // Same trap as the elevation notice: a bare inline
+                    // Application.Exit() is deferred through the XAML message
+                    // loop and never consumed. The full shutdown path carries
+                    // the deadline and Environment.Exit fallbacks.
+                    await App.Current.ShutdownForRestartAsync();
                 }
                 else
                 {
@@ -142,13 +147,13 @@ public sealed partial class SettingsWindow
 
     private async void ExportDataBackupButton_Click(object sender, RoutedEventArgs e)
     {
-        if (SettingsRoot.XamlRoot is null)
+        if (SettingsRoot.XamlRoot is null || _backupCommands.IsStopping)
         {
             return;
         }
 
         string? folderPath = await FolderPickerService.PickFolderAsync(_hWnd);
-        if (string.IsNullOrWhiteSpace(folderPath))
+        if (string.IsNullOrWhiteSpace(folderPath) || _isClosed || _backupCommands.IsStopping)
         {
             return;
         }
@@ -156,23 +161,25 @@ public sealed partial class SettingsWindow
         ExportDataBackupButton.IsEnabled = false;
         try
         {
-            await App.Current.SettingsService.SaveAsync(notifySubscribers: false);
-            string backupPath = await App.Current.DataBackupService.ExportBackupAsync(folderPath);
+            string backupPath = await _backupCommands.ExportAsync(folderPath);
+            if (_isClosed || _backupCommands.IsStopping) return;
             await ShowInfoDialogAsync(
                 _localizationService.T("Settings.DataBackup.SuccessTitle"),
                 _localizationService.Format("Settings.DataBackup.SuccessBody", backupPath));
             Win32Helper.ShowInExplorer(backupPath);
         }
+        catch (OperationCanceledException) when (_backupCommands.IsStopping) { }
         catch (Exception ex)
         {
             App.Log($"[DataBackup] Manual export failed: {ex}");
+            if (_isClosed || _backupCommands.IsStopping) return;
             await ShowInfoDialogAsync(
                 _localizationService.T("Settings.DataBackup.FailedTitle"),
                 _localizationService.Format("Settings.DataBackup.FailedBody", ex.Message));
         }
         finally
         {
-            ExportDataBackupButton.IsEnabled = true;
+            if (!_isClosed && !_backupCommands.IsStopping) ExportDataBackupButton.IsEnabled = true;
         }
     }
 
@@ -183,32 +190,29 @@ public sealed partial class SettingsWindow
             return;
         }
 
-        Windows.Storage.StorageFile? backupFile;
+        string? backupPath;
         try
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.DocumentsLibrary
-            };
-            picker.FileTypeFilter.Add(".zip");
-            InitializeWithWindow.Initialize(picker, _hWnd);
-            backupFile = await picker.PickSingleFileAsync();
+            backupPath = await FileOpenPickerService.PickSingleFileAsync(
+                _hWnd,
+                [".zip"],
+                PickerLocationId.DocumentsLibrary);
         }
         catch (Exception ex)
         {
             App.Log($"[DataBackup] Restore picker failed: {ex}");
             await ShowInfoDialogAsync(
                 _localizationService.T("Settings.DataBackup.RestoreFailedTitle"),
-                _localizationService.Format("Settings.DataBackup.RestoreFailedBody", ex.Message));
+                _localizationService.Format("Settings.DataBackup.RestoreFailedBody", FormatBackupError(ex)));
             return;
         }
 
-        if (backupFile is null || string.IsNullOrWhiteSpace(backupFile.Path))
+        if (string.IsNullOrWhiteSpace(backupPath))
         {
             return;
         }
 
-        await RestoreDataBackupFromPathAsync(backupFile.Path);
+        await RestoreDataBackupFromPathAsync(backupPath);
     }
 
     private async Task RestoreDataBackupFromPathAsync(string archivePath)
@@ -228,6 +232,11 @@ public sealed partial class SettingsWindow
             string integrityWarning = preparation.HasIntegrityManifest
                 ? string.Empty
                 : $"\n\n{_localizationService.T("Settings.DataBackup.LegacyIntegrityWarning")}";
+            string newerVersionWarning = preparation.IsFromNewerAppVersion
+                ? $"\n\n{_localizationService.Format(
+                    "Settings.DataBackup.RestoreNewerVersionWarning",
+                    preparation.AppVersion)}"
+                : string.Empty;
             var dialog = new ContentDialog
             {
                 XamlRoot = SettingsRoot.XamlRoot,
@@ -243,7 +252,7 @@ public sealed partial class SettingsWindow
                         preparation.AppVersion,
                         preparation.FileCount,
                         ViewModel.FormatBytes(preparation.TotalUncompressedBytes),
-                        integrityWarning),
+                        integrityWarning + newerVersionWarning),
                     TextWrapping = TextWrapping.Wrap
                 }
             };
@@ -251,6 +260,19 @@ public sealed partial class SettingsWindow
             if (await dialog.ShowAsync() != ContentDialogResult.Primary)
             {
                 await App.Current.DataBackupService.CancelPendingRestoreAsync();
+                return;
+            }
+
+            // The pending marker was written before this dialog opened;
+            // persist the confirmation now so a crash, hidden window, or
+            // exit between here and the relaunch discards the restore at
+            // the next launch instead of applying it unconfirmed.
+            if (!await App.Current.DataBackupService.ConfirmPendingFullRestoreAsync())
+            {
+                await App.Current.DataBackupService.CancelPendingRestoreAsync();
+                await ShowInfoDialogAsync(
+                    _localizationService.T("Settings.DataBackup.RestoreFailedTitle"),
+                    _localizationService.Format("Settings.DataBackup.RestoreFailedBody", string.Empty));
                 return;
             }
 
@@ -278,7 +300,7 @@ public sealed partial class SettingsWindow
             }
             await ShowInfoDialogAsync(
                 _localizationService.T("Settings.DataBackup.RestoreFailedTitle"),
-                _localizationService.Format("Settings.DataBackup.RestoreFailedBody", ex.Message));
+                _localizationService.Format("Settings.DataBackup.RestoreFailedBody", FormatBackupError(ex)));
         }
         finally
         {
@@ -292,36 +314,43 @@ public sealed partial class SettingsWindow
 
     private async void CreateBackupSnapshotButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_backupCommands.IsStopping) return;
         CreateBackupSnapshotButton.IsEnabled = false;
         RefreshBackupSnapshotsButton.IsEnabled = false;
         try
         {
-            await App.Current.SettingsService.SaveAsync(notifySubscribers: false);
-            string? snapshotPath = await App.Current.DataBackupService.CreateAutomaticSnapshotNowAsync();
+            var result = await _backupCommands.CreateSnapshotNowAsync();
+            if (_isClosed || _backupCommands.IsStopping) return;
+            string? snapshotPath = result.ArchivePath;
             if (snapshotPath is null)
             {
                 await ShowInfoDialogAsync(
                     _localizationService.T("Settings.DataBackup.FailedTitle"),
                     _localizationService.Format(
                         "Settings.DataBackup.FailedBody",
-                        _localizationService.T("Settings.DataBackup.Snapshots.Empty")));
+                        result.Error ?? _localizationService.T("Settings.DataBackup.Snapshots.Empty")));
                 return;
             }
 
             await RefreshBackupSnapshotInventoryAsync();
             Win32Helper.ShowInExplorer(snapshotPath);
         }
+        catch (OperationCanceledException) when (_backupCommands.IsStopping) { }
         catch (Exception ex)
         {
             App.Log($"[DataBackup] Immediate snapshot failed: {ex}");
+            if (_isClosed || _backupCommands.IsStopping) return;
             await ShowInfoDialogAsync(
                 _localizationService.T("Settings.DataBackup.FailedTitle"),
                 _localizationService.Format("Settings.DataBackup.FailedBody", ex.Message));
         }
         finally
         {
-            CreateBackupSnapshotButton.IsEnabled = true;
-            RefreshBackupSnapshotsButton.IsEnabled = true;
+            if (!_isClosed && !_backupCommands.IsStopping)
+            {
+                CreateBackupSnapshotButton.IsEnabled = true;
+                RefreshBackupSnapshotsButton.IsEnabled = true;
+            }
         }
     }
 
@@ -338,7 +367,7 @@ public sealed partial class SettingsWindow
             return;
         }
 
-        if (!App.Current.DataBackupService.IsValidCustomAutomaticBackupDirectory(
+        if (!_backupSettingsViewModel.IsValidLocalDirectory(
                 folderPath,
                 out string? rejectionReasonKey))
         {
@@ -348,13 +377,13 @@ public sealed partial class SettingsWindow
             return;
         }
 
-        ViewModel.UpdateAutomaticBackupDirectory(folderPath);
+        _backupSettingsViewModel.UpdateLocalDirectory(folderPath);
         await RefreshBackupSnapshotInventoryAsync();
     }
 
     private async void ResetAutomaticBackupDirectoryButton_Click(object sender, RoutedEventArgs e)
     {
-        ViewModel.UpdateAutomaticBackupDirectory(string.Empty);
+        _backupSettingsViewModel.UpdateLocalDirectory(string.Empty);
         await RefreshBackupSnapshotInventoryAsync();
     }
 
@@ -363,11 +392,7 @@ public sealed partial class SettingsWindow
         // With a custom folder configured, open it directly; otherwise keep the
         // pre-existing behavior of opening the recovery root that contains the
         // default "automatic" snapshot folder.
-        AutomaticBackupDirectoryStatus status = App.Current.DataBackupService.GetAutomaticBackupDirectoryStatus();
-        string directory = status.IsCustomDirectoryActive
-            ? status.EffectiveDirectory
-            : Path.GetDirectoryName(App.Current.DataBackupService.AutomaticSnapshotDirectory)
-              ?? App.Current.DataBackupService.AutomaticSnapshotDirectory;
+        string directory = _backupSettingsViewModel.State.LocalOpenDirectory;
         Directory.CreateDirectory(directory);
         Win32Helper.ShowInExplorer(directory);
     }

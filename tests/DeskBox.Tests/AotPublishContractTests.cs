@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -51,7 +51,6 @@ public sealed class AotPublishContractTests
         foreach (string projectPath in new[]
                  {
                      "src/DeskBox/DeskBox.csproj",
-                     "src/DeskBox.Abstractions/DeskBox.Abstractions.csproj",
                      "src/DeskBox.Updater/DeskBox.Updater.csproj"
                  })
         {
@@ -212,7 +211,7 @@ public sealed class AotPublishContractTests
         using JsonDocument globalJson = JsonDocument.Parse(
             File.ReadAllText(TestPaths.FromRepository("global.json")));
         JsonElement sdk = globalJson.RootElement.GetProperty("sdk");
-        Assert.Equal("10.0.303", sdk.GetProperty("version").GetString());
+        Assert.Equal("10.0.401", sdk.GetProperty("version").GetString());
         Assert.Equal("latestPatch", sdk.GetProperty("rollForward").GetString());
 
         string rustToolchain = File.ReadAllText(TestPaths.FromRepository("rust-toolchain.toml"));
@@ -298,6 +297,10 @@ public sealed class AotPublishContractTests
         Assert.Contains("#define DESKBOX_NATIVE_CAPABILITIES_STAGE_4D4B", header, StringComparison.Ordinal);
         Assert.Contains("#define DESKBOX_NATIVE_CAPABILITIES_STAGE_5B4C1B1", header, StringComparison.Ordinal);
         Assert.Contains("DESKBOX_NATIVE_CAPABILITY_RECYCLE_BIN_V1", header, StringComparison.Ordinal);
+        // Pluginization: the merged header keeps upstream's per-stage macro and
+        // layers the fork's plugin-signature bit on top, so the aggregate
+        // DESKBOX_NATIVE_CAPABILITIES alias resolves to the PLUGIN_V1 name
+        // (1023 = bits 0..9) rather than upstream's bare Stage 5B-4C1B1 value.
         Assert.Contains("DESKBOX_NATIVE_CAPABILITIES DESKBOX_NATIVE_CAPABILITIES_PLUGIN_V1", header, StringComparison.Ordinal);
         Assert.Contains("DESKBOX_SHORTCUT_READ_REQUEST_V2_SIZE_64 144u", header, StringComparison.Ordinal);
         Assert.Contains("DESKBOX_SHORTCUT_READ_RESULT_V2_SIZE_64 136u", header, StringComparison.Ordinal);
@@ -364,7 +367,7 @@ public sealed class AotPublishContractTests
         Assert.Contains("DESKBOX_SHORTCUT_BACKEND", loader, StringComparison.Ordinal);
         Assert.Contains("RuntimeFeature.IsDynamicCodeSupported", loader, StringComparison.Ordinal);
         Assert.Contains("return ShortcutBackendMode.Rust", loader, StringComparison.Ordinal);
-        Assert.Contains("LoadLibraryExW", loader, StringComparison.Ordinal);
+        Assert.Contains("Kernel32NativeMethods.LoadLibraryEx(", loader, StringComparison.Ordinal);
         Assert.Contains("LoadLibrarySearchDllLoadDir", loader, StringComparison.Ordinal);
         Assert.Contains("LoadLibrarySearchSystem32", loader, StringComparison.Ordinal);
         Assert.Contains("Path.Combine(AppContext.BaseDirectory, DllName)", loader, StringComparison.Ordinal);
@@ -466,6 +469,11 @@ public sealed class AotPublishContractTests
         XElement defaultRustProperty = project
             .Descendants("DeskBoxRustNative")
             .Single(element => element.Attribute("Condition") is not null);
+        // The fork builds the native module by default: its plugin packages
+        // (Glance / Music / Weather) load deskbox_native.dll, and package
+        // verification needs the module present. Upstream keeps it opt-in for
+        // contributor builds; the merged mainline follows the fork because the
+        // pluginization line is the long-term direction.
         Assert.Equal("true", defaultRustProperty.Value);
 
         XElement buildTarget = project
@@ -519,7 +527,7 @@ public sealed class AotPublishContractTests
         Assert.Contains("exactly one root-level deskbox_native.dll", script, StringComparison.Ordinal);
         Assert.DoesNotContain("deskbox_search_core.dll", script, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", script, StringComparison.Ordinal);
-        Assert.Contains("auditProfileVersion = 63", script, StringComparison.Ordinal);
+        Assert.Contains("auditProfileVersion = 64", script, StringComparison.Ordinal);
         Assert.Contains("warningCodeCounts", script, StringComparison.Ordinal);
         Assert.Contains("targetedWarningCounts", script, StringComparison.Ordinal);
         Assert.Contains("workingTreeFingerprintBefore", script, StringComparison.Ordinal);
@@ -544,7 +552,7 @@ public sealed class AotPublishContractTests
 
     [Theory]
     [InlineData("src/DeskBox/ViewModels/SearchPopupViewModel.cs", 15)]
-    [InlineData("src/DeskBox/ViewModels/SettingsViewModel.cs", 76)]
+    [InlineData("src/DeskBox/ViewModels/SettingsViewModel.cs", 15)]
     public void AotSensitiveViewModels_UseObservablePartialProperties(
         string relativePath,
         int expectedCount)
@@ -557,6 +565,28 @@ public sealed class AotPublishContractTests
         Assert.Equal(
             expectedCount,
             Regex.Matches(source, @"\[ObservableProperty\]\s+public\s+partial\s+").Count);
+    }
+
+    [Fact]
+    public void TodoSettingsEditor_PreservesWritableAotBindingSurface()
+    {
+        // Batch 47 moved the Todo section's binding surface onto the
+        // section editor; the writable AOT bridge follows it there.
+        string bridge = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Features/Todo/TodoSettingsViewModel.AotBindableProperties.cs"));
+        foreach ((string name, Type expectedType) in new[]
+        {
+            ("Enabled", typeof(bool)),
+            ("RemindersEnabled", typeof(bool)),
+            ("DefaultOffsetMinutes", typeof(int))
+        })
+        {
+            var property = typeof(DeskBox.Features.Todo.TodoSettingsViewModel).GetProperty(name);
+            Assert.NotNull(property);
+            Assert.Equal(expectedType, property!.PropertyType);
+            Assert.True(property.CanRead && property.CanWrite);
+            Assert.Contains($"nameof({name})", bridge, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -603,8 +633,11 @@ public sealed class AotPublishContractTests
         Assert.True(suppressionStart >= 0);
 
         int firstMigratedAssignment = source.IndexOf("AutoStart = StartupService.IsEnabled();", constructorStart, StringComparison.Ordinal);
+        // Batch 50 moved the performance trim toggles to the performance
+        // editor; the hover-button selection remains the last facade
+        // assignment covered by the constructor's suppression window.
         int lastMigratedAssignment = source.IndexOf(
-            "WeatherShowPressure = settings.WeatherShowPressure;",
+            "ShowHoverButtons = settings.ShowHoverButtons;",
             constructorStart,
             StringComparison.Ordinal);
         int suppressionEnd = source.IndexOf("_isRestoringDefaults = false;", suppressionStart, StringComparison.Ordinal);

@@ -3,6 +3,7 @@ using DeskBox.Controls;
 using DeskBox.Controls.WidgetContents;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using DeskBox.ViewModels;
 using System.ComponentModel;
@@ -12,6 +13,7 @@ using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -87,8 +89,7 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
 
         _titleViewModel = new ContentWidgetTitleViewModel(_config, settingsService);
         ContentWidgetShell.DataContext = _titleViewModel;
-        ContentWidgetShell.TitleGlyph = descriptor.DefaultGlyph;
-        ContentWidgetShell.TitleIconKind = WidgetTitleIconKindNames.FromWidgetKind(_config.WidgetKind);
+        ApplyTitleIdentity(_config, descriptor, content);
         ContentWidgetShell.ShowHoverButtons = settingsService.Settings.ShowHoverButtons;
         ContentWidgetShell.IsTitleEditable = true;
         ApplyLocalizedTitleActionTooltips();
@@ -119,10 +120,15 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
 
     protected override bool HasBlockingFlyoutOpen() =>
         base.HasBlockingFlyoutOpen() ||
-        CurrentContent is FileSurfaceContent
+        CurrentContent is FileWidgetContentAdapter
         {
             IsStackPopoverBlockingSurfaceOpen: true
         };
+
+    protected override void OnCompactBoundsTransitionActiveChanged(bool isActive)
+    {
+        CurrentContent?.OnCompactBoundsTransitionActiveChanged(isActive);
+    }
 
     protected override void OnResizeStart()
     {
@@ -141,14 +147,14 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
         string contentMode = ResolveEffectiveCompactContentMode();
         return CurrentContent switch
         {
-            FileSurfaceContent file =>
+            FileWidgetContentAdapter file =>
                 CreateFileCompactPresentation(file, contentMode),
             TodoWidgetContentAdapter todo => CreateTodoCompactPresentation(todo, contentMode, localization),
             GlanceWidgetContentAdapter glance =>
                 CreateGlanceCompactPresentation(glance),
             MusicWidgetContentAdapter music =>
                 CreateMusicCompactPresentation(music, contentMode),
-            QuickCaptureSurfaceContent quickCapture =>
+            QuickCaptureWidgetContentAdapter quickCapture =>
                 CreateQuickCaptureCompactPresentation(quickCapture, contentMode),
             WeatherWidgetContentAdapter weather => CreateWeatherCompactPresentation(weather, contentMode),
             SearchWidgetContentAdapter => CreateSearchCompactPresentation(contentMode, localization),
@@ -212,9 +218,15 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
 
         string summary = string.Join(" · ", summaryParts);
         bool hasText = !string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(summary);
-        WidgetCompactBackgroundSnapshot? background = ((IWidgetCompactBackgroundContent)glance).GetCompactBackground();
+        // Decode at the capsule's physical width instead of full resolution:
+        // the compact surface never shows more than a few hundred pixels
+        // (upstream 1.5.6 memory work). The IWidgetCompactBackgroundContent
+        // port carries no size hint, so the Glance path resolves the width
+        // here and calls the explicit overload rather than letting the
+        // adapter guess - one decode, one cache entry.
         ImageSource? backgroundImage = viewModel.HasVisibleCurrentImage
-            ? background?.ImageSource
+            ? glance.GetCompactBackgroundImage(
+                ResolveGlanceCompactBackgroundDecodeWidth())
             : null;
         return new WidgetCompactPresentation(
             title,
@@ -234,7 +246,29 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
                 viewModel.CurrentImagePath),
             FullBleedOverlayOpacity: hasText ? viewModel.ReadabilityStrengthOpacity : 0,
             UseUniformFullBleedOverlay: true,
-            FullBleedBackgroundOpacity: background?.Opacity ?? 0);
+            FullBleedBackgroundOpacity: viewModel.BackgroundImageOpacity);
+    }
+
+    /// <summary>
+    /// Physical decode width for the glance capsule's full-bleed background:
+    /// the capsule's actual logical width (aligned mode tracks the panel,
+    /// otherwise the compact width) at the current DPI, with the same 1.25
+    /// headroom the expanded surface uses. The old fixed 768 under-decoded
+    /// wide capsules and paid ~3x on narrow ones.
+    /// </summary>
+    private int ResolveGlanceCompactBackgroundDecodeWidth()
+    {
+        double logicalWidth = UsesAlignedCompactWidth()
+            ? Config.Width
+            : Config.CompactWidth ?? WidgetCompactBoundsCalculator.SummaryWidth;
+        double scale = RootElement.XamlRoot?.RasterizationScale ?? 1;
+        if (!double.IsFinite(scale) || scale <= 0)
+        {
+            scale = 1;
+        }
+
+        double physicalWidth = logicalWidth * scale * GlanceImageDecodeSizeCalculator.CompactBackgroundSupersamplingFactor;
+        return (int)Math.Clamp(Math.Ceiling(physicalWidth), 320, 1600);
     }
 
     private WidgetCompactPresentation CreateSearchCompactPresentation(
@@ -366,8 +400,7 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
             EnableMarquee: true,
             Progress: isAttention ? 1 : null,
             IsAttention: isAttention,
-            EmojiIcon: Helpers.WeatherCodeMapper.GetEmoji(
-                weather.ViewModel.CurrentWeatherCode, isDay),
+            IconImage: weather.ViewModel.CurrentIcon,
             BackgroundColorStart: colorStart,
             BackgroundColorEnd: colorEnd,
             // Avoid the former 50 ms UI-thread particle timer (20 Canvas writes
@@ -681,12 +714,26 @@ public sealed partial class ContentWidgetWindow : WidgetWindowBase, IDesktopWidg
             dividerColor);
         ContentWidgetShell.TitleIconAccentColor = iconForeground;
         ContentWidgetShell.TitleIconMode = SettingsService.Settings.WidgetTitleIconMode;
+        ApplyCustomTitleIcon();
+        ApplyCustomWidgetBackground();
+        WidgetTextShadow.SetEnabled(
+            SettingsService.Settings.WidgetShell.WidgetTextShadowEnabled);
     }
 
     protected override void OnRootElementLoaded()
     {
         RootGrid.Focus(FocusState.Programmatic);
         QueueNativeFileDropTargetRegistration();
+    }
+
+    protected override void OnCustomWidgetBackgroundChanged(bool active)
+    {
+        // User-set background wins over the Glance surface's own background
+        // image (per-widget customization rule).
+        if (CurrentContent?.View is DeskBox.Controls.WidgetContents.GlanceWidgetContent glance)
+        {
+            glance.SetShellCustomBackgroundActive(active);
+        }
     }
 
     // ── IDesktopWidgetWindow implementation ────────────────────
@@ -1091,7 +1138,7 @@ IsHideAnimationRunning = true;
 
     private void AttachHostContextMenuSource(IWidgetContent content)
     {
-        if (content is FileSurfaceContent fileSurface)
+        if (content is FileWidgetContentAdapter fileSurface)
         {
             fileSurface.SetHostWindowHandle(HWnd);
         }
@@ -1131,12 +1178,12 @@ IsHideAnimationRunning = true;
 
         _compactPresentationSource = content switch
         {
-            FileSurfaceContent file => file.ViewModel,
+            FileWidgetContentAdapter file => file.ViewModel,
             TodoWidgetContentAdapter todo => todo.ViewModel,
             GlanceWidgetContentAdapter glance => glance.ViewModel,
             MusicWidgetContentAdapter music => music.ViewModel,
             WeatherWidgetContentAdapter weather => weather.ViewModel,
-            QuickCaptureSurfaceContent quickCapture => quickCapture.ViewModel,
+            QuickCaptureWidgetContentAdapter quickCapture => quickCapture.ViewModel,
             _ => null
         };
 
@@ -1201,6 +1248,17 @@ IsHideAnimationRunning = true;
 
     private void CompactPresentationSource_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // A runtime folder remap rewrites the file view model's managed/mapped
+        // identity; push it to the shell immediately instead of waiting for a
+        // content switch or window recreation.
+        if (sender is WidgetViewModel fileViewModel &&
+            e.PropertyName is nameof(WidgetViewModel.TitleIconKind)
+                or nameof(WidgetViewModel.IconGlyph))
+        {
+            ContentWidgetShell.TitleGlyph = fileViewModel.IconGlyph;
+            ContentWidgetShell.TitleIconKind = fileViewModel.TitleIconKind;
+        }
+
         if (!IsCompactPresentationPropertyRelevant(Config.WidgetKind, e.PropertyName))
         {
             return;
@@ -1298,6 +1356,27 @@ IsHideAnimationRunning = true;
         ToolTipService.SetToolTip(ContentWidgetShell.AddActionButton, localization.T("Widget.Tooltip.Add"));
         ToolTipService.SetToolTip(ContentWidgetShell.MoreActionButton, localization.T("Widget.Tooltip.More"));
         ToolTipService.SetToolTip(ContentWidgetShell.CloseActionButton, localization.T("Widget.FeatureWidget.Disable"));
+        ApplyTitleActionAccessibleNames();
+    }
+
+    /// <summary>
+    /// Accessible names for the shell title action buttons. The lock buttons are
+    /// state-aware (lock/unlock wording), so this runs on language change and
+    /// whenever the lock state is reapplied via ApplyLockActionIconState.
+    /// </summary>
+    private void ApplyTitleActionAccessibleNames()
+    {
+        var localization = App.Current.LocalizationService;
+        AutomationProperties.SetName(
+            ContentWidgetShell.PositionLockActionButton,
+            localization.T(_config.IsPositionLocked ? "Widget.UnlockPosition" : "Widget.LockPosition"));
+        AutomationProperties.SetName(
+            ContentWidgetShell.SizeLockActionButton,
+            localization.T(_config.IsSizeLocked ? "Widget.UnlockSize" : "Widget.LockSize"));
+        AutomationProperties.SetName(ContentWidgetShell.AddActionButton, localization.T("Widget.Tooltip.Add"));
+        AutomationProperties.SetName(ContentWidgetShell.MoreActionButton, localization.T("Widget.Tooltip.More"));
+        AutomationProperties.SetName(ContentWidgetShell.CloseActionButton, localization.T("Widget.FeatureWidget.Disable"));
+        AutomationProperties.SetName(ContentWidgetShell.CollapseActionButton, localization.T("Widget.Shell.Collapse"));
     }
 
     private void SetupEventHandlers()

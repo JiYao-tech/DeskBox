@@ -5,6 +5,7 @@ using DeskBox.Models;
 using DeskBox.Services.Plugins;
 using DeskBox.Helpers;
 using DeskBox.Controls.WidgetContents;
+using DeskBox.Platform;
 using DeskBox.ViewModels;
 using DeskBox.Views;
 using Microsoft.UI.Dispatching;
@@ -45,9 +46,9 @@ public sealed partial class WidgetManager
 
     private void ApplyFeatureWidgetEnabledState(WidgetKind kind, bool enabled)
     {
-        if (App.UiDispatcherQueue is { } dispatcherQueue && !dispatcherQueue.HasThreadAccess)
+        if (!UiDispatch.HasAccess)
         {
-            dispatcherQueue.TryEnqueue(() => ApplyFeatureWidgetEnabledState(kind, enabled));
+            UiDispatch.RunOrDefer(() => ApplyFeatureWidgetEnabledState(kind, enabled));
             return;
         }
 
@@ -95,6 +96,7 @@ public sealed partial class WidgetManager
                 Width = _settingsService.Settings.DefaultWidgetWidth,
                 Height = _settingsService.Settings.DefaultWidgetHeight
             };
+            ApplyNewWidgetPlacement(config);
             _settingsService.Settings.Widgets.Add(config);
         }
 
@@ -155,9 +157,10 @@ public sealed partial class WidgetManager
             Height = Math.Max(_settingsService.Settings.DefaultWidgetHeight, 420)
         };
 
-        MarkNeedsInitialPlacementIfDisplayUnusable(config);
+        ApplyNewWidgetPlacement(config);
         _settingsService.Settings.Widgets.Add(config);
         await _settingsService.SaveAsync();
+        await TryAdoptOrphanedTodoStoreAsync(config);
         await SeedTodoGuideAsync(config);
 
         var window = await CreateContentWidgetFromConfigAsync(config, revealAfterCreate: true);
@@ -180,6 +183,41 @@ public sealed partial class WidgetManager
         catch (Exception ex)
         {
             App.Log($"[WidgetManager] Failed to seed Quick Capture guide: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// A brand-new Todo widget gets a brand-new id — but a cloud restore
+    /// may already have parked todo stores under foreign source ids
+    /// (unmapped orphans). Adopt the newest one so the restored data shows
+    /// up instead of the widget appearing empty. Runs before the guide
+    /// seed: a store with items suppresses the guide automatically.
+    /// </summary>
+    private async Task TryAdoptOrphanedTodoStoreAsync(WidgetConfig config)
+    {
+        try
+        {
+            var claimedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (WidgetConfig widget in _settingsService.Settings.Widgets)
+            {
+                claimedIds.Add(widget.Id);
+            }
+
+            foreach (string deletedId in _settingsService.Settings.DeletedWidgetIds ?? [])
+            {
+                claimedIds.Add(deletedId);
+            }
+
+            await TodoWidgetStore.TryAdoptOrphanedStoreAsync(
+                Path.Combine(
+                    DeskBoxDataPathService.Current.DataDirectory,
+                    "widgets"),
+                config.Id,
+                claimedIds);
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[WidgetManager] Orphaned todo store adoption failed: {ex.Message}");
         }
     }
 
@@ -389,7 +427,7 @@ public sealed partial class WidgetManager
             throw new NotSupportedException($"Widget kind '{kind}' is not a content feature widget.");
         }
 
-        SetFeatureWidgetEnabledState(kind, true);
+        await CommitFeatureWidgetStateAsync(kind, true);
 
         var existingConfig = _settingsService.Settings.Widgets
             .FirstOrDefault(w => w.WidgetKind == kind && !IsDeleted(w.Id));
@@ -427,7 +465,7 @@ public sealed partial class WidgetManager
         };
         ApplyDefaultFeatureWidgetChromeMode(config, kind);
 
-        MarkNeedsInitialPlacementIfDisplayUnusable(config);
+        ApplyNewWidgetPlacement(config);
         _settingsService.Settings.Widgets.Add(config);
         await _settingsService.SaveAsync();
 
@@ -496,7 +534,7 @@ public sealed partial class WidgetManager
             : await GlanceWidgetStore.ForWidget(sourceConfig.Id).LoadAsync();
         await GlanceWidgetStore.ForWidget(config.Id).SaveAsync(data);
 
-        MarkNeedsInitialPlacementIfDisplayUnusable(config);
+        ApplyNewWidgetPlacement(config);
         _settingsService.Settings.Widgets.Add(config);
         await _settingsService.SaveAsync();
 
@@ -748,7 +786,8 @@ public sealed partial class WidgetManager
         return await FinalizeImportAsync(targetWidgetId, destinationPath);
     }
 
-    public async Task<string?> TryImportTextAsync(        string text,
+    public async Task<string?> TryImportTextAsync(
+        string text,
         string fileName,
         string targetWidgetId,
         CancellationToken cancellationToken = default)
@@ -901,12 +940,12 @@ public sealed partial class WidgetManager
             ContentWidgetWindow? contentWindow = _contentWidgets.Values
                 .Distinct()
                 .FirstOrDefault(window =>
-                    window.CurrentContent is FileSurfaceContent surface &&
+                    window.CurrentContent is FileWidgetContentAdapter surface &&
                     string.Equals(
                         surface.WidgetId,
                         targetWidgetId,
                         StringComparison.Ordinal));
-            if (contentWindow?.CurrentContent is FileSurfaceContent fileSurface)
+            if (contentWindow?.CurrentContent is FileWidgetContentAdapter fileSurface)
             {
                 await fileSurface.ViewModel.RefreshFromConfigAsync();
                 fileSurface.RevealSavedItem(destinationPath);
@@ -1055,6 +1094,16 @@ public sealed partial class WidgetManager
 
     internal async Task<IDesktopWidgetWindow?> CreateOrShowFeatureWidgetAsync(WidgetKind kind)
     {
+        if (!UiDispatch.HasXamlApp)
+        {
+            // Test hosts: no XAML Application exists, so window creation
+            // cannot succeed. Skip instead of attempting it on the inline
+            // fiction thread (which produced swallowed RPC_E_WRONG_THREAD
+            // noise in the user log).
+            App.LogVerbose($"[WidgetManager] CreateOrShowFeatureWidget skipped (no XAML app): kind={kind}");
+            return null;
+        }
+
         if (!HasUiThreadAccess())
         {
             return await RunOnUiThreadAsync(() => CreateOrShowFeatureWidgetAsync(kind));
@@ -1077,6 +1126,22 @@ public sealed partial class WidgetManager
             return;
         }
 
+        if (kind == WidgetKind.QuickCapture && _quickCaptureSettings is not null)
+        {
+            await _quickCaptureSettings.SetEnabledAsync(enabled, reveal);
+            return;
+        }
+        if (kind == WidgetKind.Search && _searchFeatureSettings is not null)
+        {
+            await _searchFeatureSettings.SetEnabledAsync(enabled, reveal);
+            return;
+        }
+        if (kind == WidgetKind.Todo && _todoSettings is not null)
+        {
+            await _todoSettings.SetEnabledAsync(enabled);
+            return;
+        }
+
         if (_featureWidgetHandlers.TryGetValue(kind, out var handler) &&
             _featureWidgetUpdateLocks.TryGetValue(kind, out var updateLock))
         {
@@ -1094,6 +1159,44 @@ public sealed partial class WidgetManager
         }
 
         App.Log($"[WidgetManager] SetFeatureWidgetEnabled: unsupported kind={kind}");
+    }
+
+    internal async Task ApplyQuickCaptureWindowStateAsync(bool enabled, bool reveal)
+    {
+        if (!HasUiThreadAccess())
+        {
+            await RunOnUiThreadAsync(() => ApplyQuickCaptureWindowStateAsync(enabled, reveal));
+            return;
+        }
+
+        SemaphoreSlim gate = _featureWidgetUpdateLocks[WidgetKind.QuickCapture];
+        await gate.WaitAsync();
+        try
+        {
+            if (_quickCaptureSettings is not null && _quickCaptureSettings.Read().Enabled != enabled)
+                return;
+            await SetQuickCaptureEnabledAsync(enabled, reveal);
+        }
+        finally { gate.Release(); }
+    }
+
+    internal async Task ApplySearchWindowStateAsync(bool enabled, bool reveal)
+    {
+        if (!HasUiThreadAccess())
+        {
+            await RunOnUiThreadAsync(() => ApplySearchWindowStateAsync(enabled, reveal));
+            return;
+        }
+
+        SemaphoreSlim gate = _featureWidgetUpdateLocks[WidgetKind.Search];
+        await gate.WaitAsync();
+        try
+        {
+            if (_searchFeatureSettings is not null && _searchFeatureSettings.Enabled != enabled)
+                return;
+            await SetSearchFeatureWidgetEnabledAsync(enabled, reveal);
+        }
+        finally { gate.Release(); }
     }
 
     public async Task ResetFeatureWidgetAsync(WidgetKind kind)
@@ -1152,7 +1255,7 @@ public sealed partial class WidgetManager
                 await new GlanceImageService().ClearCacheAsync();
             }
 
-            SetFeatureWidgetEnabledState(kind, false);
+            await CommitFeatureWidgetStateAsync(kind, false);
             var config = configs.FirstOrDefault(widget => !IsDeleted(widget.Id)) ??
                          configs.FirstOrDefault();
 
@@ -1198,6 +1301,7 @@ public sealed partial class WidgetManager
             if (config is null)
             {
                 config = CreateDefaultFeatureWidgetConfig(kind, isEnabled: false);
+                ApplyNewWidgetPlacement(config);
                 _settingsService.Settings.Widgets.Add(config);
             }
             else
@@ -1256,7 +1360,10 @@ public sealed partial class WidgetManager
         config.PositionMarginY = 0;
         config.PositionMonitorKey = null;
         config.PositionMonitorDeviceName = null;
+        config.PositionMonitorStableId = null;
         config.PositionMonitorWasPrimary = null;
+        config.ScreenBindingMode = WidgetScreenBindingMode.Unbound;
+        config.BoundScreenId = null;
         config.BoundsCoordinateVersion = WidgetConfig.CurrentBoundsCoordinateVersion;
         (config.Width, config.Height) = GetDefaultFeatureWidgetSize(kind);
         config.ViewMode = ViewMode.Icon;
@@ -1343,7 +1450,7 @@ public sealed partial class WidgetManager
     {
         if (enabled)
         {
-            SetFeatureWidgetEnabledState(kind, true);
+            await CommitFeatureWidgetStateAsync(kind, true);
             if (reveal)
             {
                 await CreateSingletonContentFeatureWidgetAsync(kind);
@@ -1377,7 +1484,7 @@ public sealed partial class WidgetManager
         // Close the content window while feature-owned services are still
         // available. Search content, for example, must unsubscribe from the
         // exact SearchHistoryService instance before that service is released.
-        SetFeatureWidgetEnabledState(kind, false);
+        await CommitFeatureWidgetStateAsync(kind, false);
         await _settingsService.SaveAsync();
     }
 
@@ -1464,10 +1571,39 @@ public sealed partial class WidgetManager
     /// </summary>
     public event Action<FeatureStateChangedEventArgs>? FeatureStateChanged;
 
+    private async Task CommitFeatureWidgetStateAsync(WidgetKind kind, bool enabled)
+    {
+        if (kind == WidgetKind.Search && _searchFeatureSettings is not null)
+        {
+            await _searchFeatureSettings.CommitEnabledStateAsync(enabled);
+            _lastFeatureWidgetEnabledStates[kind] = GetFeatureWidgetEnabledState(kind);
+            return;
+        }
+        SetFeatureWidgetEnabledState(kind, enabled);
+    }
+
     private void SetFeatureWidgetEnabledState(WidgetKind kind, bool enabled)
     {
-        FeatureWidgetSettings.SetEnabled(_settingsService.Settings, kind, enabled);
+        if (kind == WidgetKind.Search && _searchFeatureSettings is not null)
+            throw new InvalidOperationException("Search state commits must await their runtime boundary.");
         _lastFeatureWidgetEnabledStates[kind] = enabled;
+        // Feature-settings coordinators own the persisted commit for the
+        // features that exposed one; the rest still write the shared slice.
+        if (kind == WidgetKind.Todo && _todoSettings is not null)
+        {
+            _todoSettings.CommitEnabledState(enabled);
+        }
+        else if (kind == WidgetKind.QuickCapture && _quickCaptureSettings is not null)
+        {
+            _quickCaptureSettings.CommitEnabledState(enabled);
+        }
+        else
+        {
+            FeatureWidgetSettings.SetEnabled(_settingsService.Settings, kind, enabled);
+        }
+
+        // Stage 3b, cut point 3: the state change is raised through the
+        // contract port instead of a hardcoded switch calling App.Current.
         if (TryGetFeatureId(kind) is { } featureId)
         {
             RaiseFeatureStateChanged(featureId, enabled);
@@ -1545,19 +1681,10 @@ public sealed partial class WidgetManager
 
         window.Config.IsVisible = false;
 
-        if (window.Config.WidgetKind == WidgetKind.File &&
-                 _fileWidgets.TryGetValue(window.Config.Id, out var fileEntry) &&
-                 ReferenceEquals(fileEntry.Host, window))
-        {
-            _fileWidgets.Remove(window.Config.Id);
-        }
+        RemoveFileWidgetSessionsForHost(window);
 
-        if (_contentWidgets.TryGetValue(window.Config.Id, out var contentWindow) &&
-            ReferenceEquals(contentWindow, window))
-        {
-            _contentWidgets.Remove(window.Config.Id);
-            _widgetWindowHandles.Remove(window.WindowHandle);
-        }
+        if (window is ContentWidgetWindow contentWindow)
+            _contentWindowRegistration.Unregister(contentWindow);
 
         try
         {

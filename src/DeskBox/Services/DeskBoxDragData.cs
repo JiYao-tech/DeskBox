@@ -1,3 +1,4 @@
+using DeskBox.Helpers;
 using System.Net.Http;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -28,6 +29,10 @@ public static class DeskBoxDragData
     {
         Timeout = TimeSpan.FromSeconds(30)
     };
+
+    // Same ceiling the native path enforces: one dropped payload can never
+    // materialize more than this onto disk or into memory.
+    private const long MaxMaterializedBytes = 256L * 1024 * 1024;
 
     public static void SetText(DataPackage dataPackage, string? text, string source)
     {
@@ -137,46 +142,61 @@ public static class DeskBoxDragData
     }
 
     public static DataPackageOperation GetFileAssociationOperation(
-        DataPackageView dataView)
+        DataPackageView dataView,
+        DataPackageOperation allowedOperations =
+            DataPackageOperation.Copy | DataPackageOperation.Move)
     {
-        return IsInternalFileDrag(dataView)
-            ? DataPackageOperation.Link
-            : DataPackageOperation.Copy;
+        return ResolveFileDragFeedbackOperation(
+            dataView,
+            IsInternalFileDrag(dataView)
+                ? DataPackageOperation.Link
+                : DataPackageOperation.Copy,
+            allowedOperations);
     }
 
-    public static bool ShouldShowImportOverlay(
-        IReadOnlyList<string> paths)
-    {
-        const long ThresholdBytes = 10 * 1024 * 1024;
+    // Internal metadata drags (todo/quick-capture reorder, tab moves) route
+    // through private payload formats, so the transport effect is only a
+    // glyph hint. Copy-export payloads advertise a single Copy effect —
+    // feedback must fall back to Copy when Move is not in the offer.
+    internal static DataPackageOperation ResolveInternalMetadataOperation(
+        DataPackageOperation allowedOperations) =>
+        allowedOperations.HasFlag(DataPackageOperation.Move)
+            ? DataPackageOperation.Move
+            : allowedOperations.HasFlag(DataPackageOperation.Copy)
+                ? DataPackageOperation.Copy
+                : DataPackageOperation.None;
 
-        long totalSize = 0;
-        foreach (string path in paths)
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    totalSize += new FileInfo(path).Length;
-                }
-                else if (Directory.Exists(path))
-                {
-                    // Avoid recursively enumerating a folder on the UI path.
-                    return true;
-                }
-            }
-            catch
-            {
-                return true;
-            }
+    // Copy is the transport acknowledgement inside the app for a DeskBox file
+    // drag. The source advertises Copy|Move to external receivers, but an
+    // in-app target resolves file-system intent through the private paths and
+    // the managed-transfer policy — OLE feedback must never authorize shell
+    // source cleanup, so every non-None internal report is normalized to Copy.
+    // A drag advertised with a single effect (Windows 10 collapses the set to
+    // Move) has no Copy to answer with: internal feedback falls back to Move
+    // there so the routed drop still fires. Completion results never flow
+    // through this fallback — ResolveSafeDropCompletionOperation stays the
+    // sole guard that never reports Move for a DeskBox drag.
+    internal static DataPackageOperation ResolveFileDragFeedbackOperation(
+        DataPackageView dataView,
+        DataPackageOperation operation,
+        DataPackageOperation allowedOperations =
+            DataPackageOperation.Copy | DataPackageOperation.Move) =>
+        operation != DataPackageOperation.None &&
+        IsInternalFileDrag(dataView)
+            ? !allowedOperations.HasFlag(DataPackageOperation.Copy) &&
+              allowedOperations.HasFlag(DataPackageOperation.Move)
+                ? DataPackageOperation.Move
+                : DataPackageOperation.Copy
+            : operation;
 
-            if (totalSize >= ThresholdBytes)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    internal static DataPackageOperation GetFileTransferOperations(
+        DataPackageView dataView,
+        DataPackageOperation allowedOperations) =>
+        IsInternalFileDrag(dataView)
+            ? DataPackageOperation.Copy | DataPackageOperation.Move | DataPackageOperation.Link
+            : allowedOperations == DataPackageOperation.None
+                ? dataView.RequestedOperation
+                : allowedOperations;
 
     public static async Task<DroppedFileBatch> TryGetDroppedFilesAsync(DataPackageView dataView)
     {
@@ -443,6 +463,7 @@ public static class DeskBoxDragData
             return null;
         }
 
+        string? destinationPath = null;
         try
         {
             string fileName = FileService.SanitizeFileSystemName(
@@ -452,21 +473,69 @@ public static class DeskBoxDragData
                 fileName = "Dropped web resource";
             }
 
-            string destinationPath = FileService.GetAvailablePath(
+            destinationPath = FileService.GetAvailablePath(
                 Path.Combine(temporaryDirectory, fileName));
-            byte[] bytes = await s_virtualDropHttpClient.GetByteArrayAsync(uri);
-            await File.WriteAllBytesAsync(destinationPath, bytes);
+            // Stream the response instead of buffering it whole: the URL comes
+            // from the drop payload, so its size is untrusted.
+            using HttpResponseMessage response = await s_virtualDropHttpClient.GetAsync(
+                uri,
+                HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            long? declaredLength = response.Content.Headers.ContentLength;
+            if (declaredLength > MaxMaterializedBytes)
+            {
+                App.Log(
+                    $"[DragDrop] Web drop '{uri}' declares {declaredLength} bytes; " +
+                    "rejected over the materialization budget.");
+                return null;
+            }
+
+            long totalBytes = 0;
+            using Stream sourceStream = await response.Content.ReadAsStreamAsync();
+            using (var destination = new FileStream(
+                destinationPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 81920,
+                useAsync: true))
+            {
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await sourceStream.ReadAsync(buffer)) > 0)
+                {
+                    totalBytes += read;
+                    if (totalBytes > MaxMaterializedBytes)
+                    {
+                        App.Log(
+                            $"[DragDrop] Web drop '{uri}' exceeded " +
+                            $"{MaxMaterializedBytes} bytes mid-stream; aborted.");
+                        destination.Dispose();
+                        try { File.Delete(destinationPath); } catch { }
+                        return null;
+                    }
+
+                    await destination.WriteAsync(buffer.AsMemory(0, read));
+                }
+            }
+
             destinationPath =
                 VirtualDropFileNameResolver.AddMissingExtensionFromContent(
                     destinationPath);
+            ZoneIdentifierWriter.TryMarkFile(destinationPath, uri.AbsoluteUri);
             App.Log(
                 $"[DragDrop] Materialized web drop url='{uri}' " +
-                $"path='{destinationPath}' bytes={bytes.Length}");
+                $"path='{destinationPath}' bytes={totalBytes}");
             return destinationPath;
         }
         catch (Exception ex)
         {
             App.Log($"[DragDrop] Failed to materialize web drop '{uri}': {ex.Message}");
+            if (destinationPath is not null)
+            {
+                try { File.Delete(destinationPath); } catch { }
+            }
+
             return null;
         }
     }
@@ -501,6 +570,13 @@ public static class DeskBoxDragData
         Directory.CreateDirectory(temporaryDirectory);
         string destinationPath = FileService.GetAvailablePath(
             Path.Combine(temporaryDirectory, fileName));
+        if (source.Size > MaxMaterializedBytes)
+        {
+            throw new IOException(
+                $"The dropped stream of {source.Size} bytes exceeds the " +
+                $"{MaxMaterializedBytes}-byte materialization budget.");
+        }
+
         source.Seek(0);
         using Stream sourceStream = source.AsStreamForRead();
         await using (var destination = new FileStream(
@@ -511,11 +587,29 @@ public static class DeskBoxDragData
                          bufferSize: 81920,
                          useAsync: true))
         {
-            await sourceStream.CopyToAsync(destination);
+            var buffer = new byte[81920];
+            long totalBytes = 0;
+            int read;
+            while ((read = await sourceStream.ReadAsync(buffer)) > 0)
+            {
+                totalBytes += read;
+                if (totalBytes > MaxMaterializedBytes)
+                {
+                    throw new IOException(
+                        "The dropped stream exceeded the materialization " +
+                        $"budget of {MaxMaterializedBytes} bytes mid-copy.");
+                }
+
+                await destination.WriteAsync(buffer.AsMemory(0, read));
+            }
         }
 
-        return VirtualDropFileNameResolver.AddMissingExtensionFromContent(
+        string resolvedPath = VirtualDropFileNameResolver.AddMissingExtensionFromContent(
             destinationPath);
+        ZoneIdentifierWriter.TryMarkFile(
+            resolvedPath,
+            ZoneIdentifierWriter.VirtualDropSource);
+        return resolvedPath;
     }
 
     private static string CreateTemporaryDropDirectory()

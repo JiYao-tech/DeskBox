@@ -8,7 +8,9 @@ public sealed record WidgetGroupMemberPresentation(
     WidgetKind WidgetKind,
     string Glyph,
     string IconKind,
-    bool IsActive);
+    bool IsActive,
+    string CustomTitleIconEmoji = "",
+    string? CustomTitleIconImagePath = null);
 
 public sealed record WidgetGroupPresentation(
     string GroupId,
@@ -25,7 +27,8 @@ public enum WidgetGroupSwitchOrigin
     Programmatic,
     Picker,
     Wheel,
-    Keyboard
+    Keyboard,
+    DragHover
 }
 
 public sealed class WidgetGroupMemberEventArgs(

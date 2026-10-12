@@ -18,22 +18,84 @@
                                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
                                 <FontIcon x:Name="CheckIcon" Glyph="&#xE73E;" FontSize="11"
                                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Visibility="Collapsed" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                          Visibility="Collapsed" Foreground="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
                             </Border>
                             <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center"
                                               Content="{TemplateBinding Content}" />
                             <VisualStateManager.VisualStateGroups>
-                                <VisualStateGroup x:Name="CheckStates">
+                                <!-- Single cartesian group (the official CheckBox pattern):
+                                     separate CommonStates/CheckStates groups would both write
+                                     SelectionBox.Background and the most recently entered
+                                     state wins, erasing the checked fill while hovering. -->
+                                <VisualStateGroup x:Name="CombinedStates">
                                     <VisualState x:Name="Unchecked" />
+                                    <VisualState x:Name="UncheckedPointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource ControlAltFillColorTertiaryBrush}" />
+                                            <Setter Target="SelectionBox.BorderBrush" Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="UncheckedPressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource ControlAltFillColorQuarternaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="UncheckedDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Opacity" Value="0.4" />
+                                        </VisualState.Setters>
+                                    </VisualState>
                                     <VisualState x:Name="Checked">
                                         <VisualState.Setters>
-                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="SelectionBox.BorderBrush" Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="SelectionBox.BorderBrush" Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Opacity" Value="0.4" />
                                             <Setter Target="CheckIcon.Visibility" Value="Visible" />
                                         </VisualState.Setters>
                                     </VisualState>
                                     <VisualState x:Name="Indeterminate">
                                         <VisualState.Setters>
-                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                            <Setter Target="CheckIcon.Opacity" Value="0.6" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="IndeterminatePointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="SelectionBox.BorderBrush" Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                            <Setter Target="CheckIcon.Opacity" Value="0.6" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="IndeterminatePressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Background" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                            <Setter Target="CheckIcon.Visibility" Value="Visible" />
+                                            <Setter Target="CheckIcon.Opacity" Value="0.6" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="IndeterminateDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionBox.Opacity" Value="0.4" />
                                             <Setter Target="CheckIcon.Visibility" Value="Visible" />
                                             <Setter Target="CheckIcon.Opacity" Value="0.6" />
                                         </VisualState.Setters>
@@ -114,6 +176,13 @@
             </InfoBar>
             <InfoBar x:Name="ResultInfo" IsClosable="True" IsOpen="False" />
             <InfoBar x:Name="RecoveryInfo" IsClosable="False" Severity="Warning" IsOpen="False">
+                <!-- A single inline hyperlink stays on one line in the content
+                     region, so it cannot collide with the action slot; the
+                     ActionButton slot itself only accepts one ButtonBase. -->
+                <InfoBar.Content>
+                    <HyperlinkButton x:Name="AbandonRecoveryButton" Click="AbandonRecoveryButton_Click"
+                                     VerticalAlignment="Center" Padding="0" />
+                </InfoBar.Content>
                 <InfoBar.ActionButton>
                     <Button x:Name="RecoverButton" Click="RecoverButton_Click" />
                 </InfoBar.ActionButton>
@@ -156,16 +225,17 @@
             <TextBlock x:Name="ExecutionProgressText" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
         <Border Grid.Row="4" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="0,10,0,0">
-            <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" ColumnSpacing="8">
                 <TextBlock x:Name="FooterSummaryText" VerticalAlignment="Center" TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <Button x:Name="UndoButton" Grid.Column="1" Click="UndoButton_Click" Visibility="Collapsed" />
-                <Button x:Name="CancelButton" Grid.Column="2" Click="CancelButton_Click" />
-                <Button x:Name="DoneButton" Grid.Column="2" Click="DoneButton_Click"
+                <Button x:Name="AbandonUndoButton" Grid.Column="2" Click="AbandonUndoButton_Click" Visibility="Collapsed" />
+                <Button x:Name="CancelButton" Grid.Column="3" Click="CancelButton_Click" />
+                <Button x:Name="DoneButton" Grid.Column="3" Click="DoneButton_Click"
                         Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
-                <Button x:Name="RetryPublicButton" Grid.Column="3" Click="RetryPublicButton_Click"
+                <Button x:Name="RetryPublicButton" Grid.Column="4" Click="RetryPublicButton_Click"
                         Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
-                <Button x:Name="ExecuteButton" Grid.Column="3" Click="ExecuteButton_Click"
+                <Button x:Name="ExecuteButton" Grid.Column="4" Click="ExecuteButton_Click"
                         IsEnabled="False" Style="{StaticResource AccentButtonStyle}" />
             </Grid>
         </Border>

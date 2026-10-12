@@ -3,6 +3,7 @@
 using DeskBox.Controls;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
@@ -25,7 +26,7 @@ namespace DeskBox.Views;
 /// Shared base class for all desktop widget windows (file, content, quick-capture).
 /// Consolidates window setup, backdrop management, layer/Z-order control,
 /// drag/resize logic, and display-change restoration that was previously
-/// duplicated across ContentWidgetWindow and QuickCaptureWidgetWindow.
+/// duplicated across per-widget window implementations.
 /// </summary>
 public abstract partial class WidgetWindowBase : Window
 {
@@ -76,7 +77,7 @@ public abstract partial class WidgetWindowBase : Window
     protected bool IsResizing;
     protected bool IsApplyingBounds;
     protected string ResizeDirection = string.Empty;
-    protected Win32Helper.POINT InitialCursorPt;
+    protected Win32Helper.POINT InitialPointerPt;
     protected PointInt32 InitialWindowPos;
     protected SizeInt32 InitialWindowSize;
     protected FrameworkElement? DragCaptureElement;
@@ -156,6 +157,9 @@ public abstract partial class WidgetWindowBase : Window
         TrayAnimation.IsPositionTransitionActive ||
         WidgetShellControl.HasActiveVisualWork;
 
+    internal bool HasAmbientVisualWork =>
+        WidgetShellControl.HasAmbientVisualWork;
+
     /// <summary>Log prefix used in Z-order and backdrop log messages.</summary>
     protected abstract string LogPrefix { get; }
 
@@ -194,6 +198,15 @@ public abstract partial class WidgetWindowBase : Window
     /// <summary>Extra guards that block RestoreDesktopLayer (e.g. open flyouts).</summary>
     protected virtual bool HasBlockingFlyoutOpen()
     {
+        // The native Shell context menu lives in the proxy process, so no XAML
+        // popup ever exists for it. Without this guard an expanded capsule
+        // auto-collapses while the user browses a menu that extends past the
+        // expanded bounds (the pointer reads as outside the window).
+        if (ShellContextMenuProxy.IsMenuRoundInFlight)
+        {
+            return true;
+        }
+
         XamlRoot? xamlRoot = RootElement.XamlRoot;
         return xamlRoot is not null &&
             VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Count > 0;
@@ -294,6 +307,11 @@ public abstract partial class WidgetWindowBase : Window
         CompleteBoundsInteractionFrameMetrics(ref _titleBarDragFrameMetrics, "drag", "closed");
         CancelPendingInteractiveResizeFrame();
         EndInteractiveResizePerformanceSession("closed");
+        // A window closed mid-gesture must terminate the overlay session —
+        // otherwise the service stays active and highlights freeze on the
+        // remaining widgets.  Both calls are no-ops when no session runs.
+        App.Current?.ResizeGuideOverlay?.EndDrag();
+        App.Current?.ResizeGuideOverlay?.EndResize();
         RemoveDesktopPinnedPointerRouting();
         RemoveDesktopPinnedActivationGuard();
         WidgetShellControl.HostedContentChanged -= WidgetShellControl_HostedContentChanged;

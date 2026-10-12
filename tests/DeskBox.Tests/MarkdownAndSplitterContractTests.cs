@@ -1,4 +1,4 @@
-using System.Xml.Linq;
+﻿using System.Xml.Linq;
 
 namespace DeskBox.Tests;
 
@@ -155,7 +155,10 @@ public sealed class MarkdownAndSplitterContractTests
             "_contentForeground = Foreground ?? BrushResource(\"TextFillColorPrimaryBrush\")",
             reader,
             StringComparison.Ordinal);
-        Assert.Contains("VisualTreeHelper.GetParent(current)", reader, StringComparison.Ordinal);
+        Assert.Contains(
+            "NeutralInteractionBrush.ResolveThemedResource",
+            reader,
+            StringComparison.Ordinal);
         Assert.Contains("_semanticForeground = UsesDarkTheme", reader, StringComparison.Ordinal);
         Assert.Contains("AccentTextFillColorPrimaryBrush", reader, StringComparison.Ordinal);
         Assert.Contains("CreateLightThemeSemanticForeground", reader, StringComparison.Ordinal);
@@ -220,13 +223,10 @@ public sealed class MarkdownAndSplitterContractTests
             "src/DeskBox/Controls/MarkdownDocumentView.cs"));
         string surface = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml"));
-        string standalone = File.ReadAllText(TestPaths.FromRepository(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.xaml"));
 
         Assert.Contains("InternalScrollBarContentClearance = 12", reader, StringComparison.Ordinal);
         Assert.Contains("_documentText.Margin = UseInternalScrollViewer", reader, StringComparison.Ordinal);
         Assert.Contains("Margin=\"8,4,0,6\"", surface, StringComparison.Ordinal);
-        Assert.Contains("Margin=\"8,6,0,6\"", standalone, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -401,6 +401,8 @@ public sealed class MarkdownAndSplitterContractTests
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml"));
         string surface = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml.cs"));
+        string adapter = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Controls/WidgetContents/QuickCaptureWidgetContentAdapter.cs"));
         string manager = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Services/WidgetManager.cs"));
         string features = File.ReadAllText(TestPaths.SourceFile(
@@ -419,7 +421,7 @@ public sealed class MarkdownAndSplitterContractTests
         Assert.Contains("x:Name=\"DetailMarkdownEditor\"", xaml, StringComparison.Ordinal);
         Assert.Contains("RightTapped=\"QuickCaptureItem_RightTapped\"", xaml, StringComparison.Ordinal);
         Assert.Contains("WidgetMetadataKeys.QuickCaptureMasterPaneWidth", surface, StringComparison.Ordinal);
-        Assert.Contains("IWidgetAddActionContent", surface, StringComparison.Ordinal);
+        Assert.Contains("IWidgetAddActionContent", adapter, StringComparison.Ordinal);
         Assert.Contains("DetailMarkdownView_TaskToggleRequested", surface, StringComparison.Ordinal);
         Assert.Contains("TimeSpan.FromMilliseconds(DetailAutoSaveDelayMs)", surface, StringComparison.Ordinal);
         Assert.Contains("DetailMarkdownEditor_EditorTextChanged", surface, StringComparison.Ordinal);
@@ -441,6 +443,8 @@ public sealed class MarkdownAndSplitterContractTests
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml"));
         string code = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml.cs"));
+        string adapter = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Controls/WidgetContents/QuickCaptureWidgetContentAdapter.cs"));
 
         Assert.Contains("x:Name=\"QuickCaptureViewSegmented\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"PaneSplitter\"", xaml, StringComparison.Ordinal);
@@ -451,8 +455,8 @@ public sealed class MarkdownAndSplitterContractTests
         Assert.Contains("WidgetSegmentedStyleHelper.Apply", code, StringComparison.Ordinal);
         Assert.Contains("ViewModel.TabStyle", code, StringComparison.Ordinal);
         Assert.Contains("Config.Metadata[WidgetMetadataKeys.QuickCaptureMasterPaneWidth]", code, StringComparison.Ordinal);
-        Assert.Contains("IWidgetResponsiveLayoutContent", code, StringComparison.Ordinal);
-        Assert.Contains("IWidgetHostViewportContent", code, StringComparison.Ordinal);
+        Assert.Contains("IWidgetResponsiveLayoutContent", adapter, StringComparison.Ordinal);
+        Assert.Contains("IWidgetHostViewportContent", adapter, StringComparison.Ordinal);
         Assert.Contains("OnHostViewportSizeChanged", code, StringComparison.Ordinal);
         Assert.Contains("_hostViewportWidth", code, StringComparison.Ordinal);
         Assert.Contains("_isResponsiveLayoutTransitionActive = true;", code, StringComparison.Ordinal);
@@ -650,25 +654,14 @@ public sealed class MarkdownAndSplitterContractTests
     {
         string surfaceXaml = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Controls/WidgetContents/QuickCaptureSurfaceContent.xaml"));
-        string legacyWindowXaml = File.ReadAllText(TestPaths.FromRepository(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.xaml"));
 
         Assert.Contains(
             "Foreground=\"{ThemeResource TextFillColorSecondaryBrush}\" Glyph=\"&#xE710;\"",
             surfaceXaml,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "Foreground=\"{ThemeResource TextFillColorSecondaryBrush}\"",
-            legacyWindowXaml,
-            StringComparison.Ordinal);
-        Assert.Contains("Glyph=\"&#xE710;\"", legacyWindowXaml, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "AccentTextFillColorPrimaryBrush",
             surfaceXaml,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "AccentTextFillColorPrimaryBrush",
-            legacyWindowXaml,
             StringComparison.Ordinal);
     }
 }

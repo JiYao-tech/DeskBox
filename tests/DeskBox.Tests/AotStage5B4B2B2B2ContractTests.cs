@@ -1,4 +1,4 @@
-namespace DeskBox.Tests;
+﻿namespace DeskBox.Tests;
 
 public sealed class AotStage5B4B2B2B2ContractTests
 {
@@ -136,10 +136,20 @@ public sealed class AotStage5B4B2B2B2ContractTests
         string product = ReadRepositoryFile(
             "src/DeskBox/ViewModels/TodoWidgetViewModel.DetailAndAttachments.cs");
         int saveIndex = product.IndexOf("await SaveAsync();", StringComparison.Ordinal);
-        int deleteIndex = product.IndexOf("File.Delete(attachment.FilePath);", StringComparison.Ordinal);
+        int deleteIndex = product.IndexOf(
+            "AttachmentStorageService.TryDeleteManagedCopyAsync(",
+            StringComparison.Ordinal);
 
         Assert.Contains("AttachmentStorageService.ImportPathAsync", product, StringComparison.Ordinal);
         Assert.Contains("copyToManagedStorageOverride", product, StringComparison.Ordinal);
+        // The deletion call must be the containment-guarded Recycle-Bin path
+        // against the managed attachment root, never a bare permanent delete.
+        Assert.Contains(
+            "AttachmentStorageService.TryDeleteManagedCopyAsync(",
+            product,
+            StringComparison.Ordinal);
+        Assert.Contains("_store.AttachmentDirectory,", product, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.Delete(attachment.FilePath)", product, StringComparison.Ordinal);
         Assert.True(saveIndex >= 0 && deleteIndex > saveIndex);
     }
 
@@ -302,9 +312,9 @@ public sealed class AotStage5B4B2B2B2ContractTests
         string baseline = ReadRepositoryFile(
             "tests/DeskBox.Tests/JsonSerializationBaselineContractTests.cs");
 
-        Assert.Contains("Assert.Equal(29, actual.Count);", baseline, StringComparison.Ordinal);
-        Assert.Contains("Assert.Equal(67, actual.Values.Sum());", baseline, StringComparison.Ordinal);
-        Assert.Contains("Assert.Equal(27, actualContextOwners.Length);", baseline, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(39, actual.Count);", baseline, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(93, actual.Values.Sum());", baseline, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(35, actualContextOwners.Length);", baseline, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -314,10 +324,10 @@ public sealed class AotStage5B4B2B2B2ContractTests
         string launcher = ReadRepositoryFile("scripts/start-aot-preview.ps1");
         string project = ReadRepositoryFile("src/DeskBox/DeskBox.csproj");
 
-        Assert.Contains("$auditProfileVersion = 63", audit, StringComparison.Ordinal);
+        Assert.Contains("$auditProfileVersion = 64", audit, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B2B2B2", audit, StringComparison.Ordinal);
-        Assert.Contains("$RequiredAuditProfileVersion = 63", launcher, StringComparison.Ordinal);
+        Assert.Contains("$RequiredAuditProfileVersion = 64", launcher, StringComparison.Ordinal);
         Assert.Contains("$RequiredSummarySchemaVersion = 55", launcher, StringComparison.Ordinal);
         Assert.Contains("stage 5B-4C3B2B1", project, StringComparison.Ordinal);
         Assert.Contains("Todo managed attachments", project, StringComparison.Ordinal);

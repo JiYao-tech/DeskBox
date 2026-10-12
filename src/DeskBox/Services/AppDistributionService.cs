@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using DeskBox.Platform;
 using System.Text;
 
 namespace DeskBox.Services;
@@ -19,7 +19,6 @@ public sealed class AppDistributionService
 
     public AppDistributionChannel CurrentChannel { get; }
     public bool IsPackaged { get; }
-    public bool IsDirect => CurrentChannel == AppDistributionChannel.Direct;
     public bool IsMicrosoftStore => CurrentChannel == AppDistributionChannel.MicrosoftStore;
     public string ChannelName => IsMicrosoftStore ? "Microsoft Store" : "Direct";
 
@@ -31,7 +30,7 @@ public sealed class AppDistributionService
         public static bool HasPackageIdentity()
         {
             int length = 0;
-            int result = GetCurrentPackageFullName(ref length, null);
+            int result = Kernel32NativeMethods.GetCurrentPackageFullName(ref length, null);
             if (result == AppModelErrorNoPackage)
             {
                 return false;
@@ -40,13 +39,10 @@ public sealed class AppDistributionService
             if (result == ErrorInsufficientBuffer && length > 0)
             {
                 var packageFullName = new StringBuilder(length);
-                return GetCurrentPackageFullName(ref length, packageFullName) == 0;
+                return Kernel32NativeMethods.GetCurrentPackageFullName(ref length, packageFullName) == 0;
             }
 
             return result == 0;
         }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetCurrentPackageFullName(ref int packageFullNameLength, StringBuilder? packageFullName);
     }
 }

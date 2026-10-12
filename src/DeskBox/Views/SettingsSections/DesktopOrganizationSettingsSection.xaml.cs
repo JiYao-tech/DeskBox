@@ -55,6 +55,8 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
         AutoToggleCard.Visibility = hasEffectiveRules
             ? Visibility.Visible
             : Visibility.Collapsed;
+        AutoIntervalCard.Visibility = AutoToggleCard.Visibility;
+        RefreshAutoIntervalOptions(settingsService);
         OrganizationSummaryCard.Header = settingsService.Settings.DesktopAutoOrganizationEnabled
             ? T("DesktopOrganization.Status.Running")
             : T("DesktopOrganization.Status.Ready");
@@ -91,45 +93,23 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
         {
             DesktopOrganizationRule? rule = settings.DesktopOrganizationRules.FirstOrDefault(candidate =>
                 string.Equals(candidate.TargetWidgetId, widget.Id, StringComparison.Ordinal));
-            var button = new Button
+            var card = new CommunityToolkit.WinUI.Controls.SettingsCard
             {
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Tag = widget.Id,
-                Padding = new Thickness(16, 11, 16, 11)
+                IsClickEnabled = true,
+                HorizontalContentAlignment = HorizontalAlignment.Right,
+                Header = widget.Name,
+                Description = BuildRuleSummary(rule)
             };
-            button.Click += WidgetRuleButton_Click;
-
-            var grid = new Grid { ColumnSpacing = 12 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var icon = new FontIcon { Glyph = "\uE8B7", FontSize = 18, VerticalAlignment = VerticalAlignment.Center };
-            var text = new StackPanel { Spacing = 3 };
-            text.Children.Add(new TextBlock
-            {
-                Text = widget.Name,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-            });
-            text.Children.Add(new TextBlock
-            {
-                Text = BuildRuleSummary(rule),
-                Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
-                TextWrapping = TextWrapping.Wrap
-            });
-            var chevron = new FontIcon
+            card.HeaderIcon = new FontIcon { Glyph = "\uE8B7" };
+            card.Content = new FontIcon
             {
                 Glyph = "\uE76C",
                 FontSize = 12,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            Grid.SetColumn(text, 1);
-            Grid.SetColumn(chevron, 2);
-            grid.Children.Add(icon);
-            grid.Children.Add(text);
-            grid.Children.Add(chevron);
-            button.Content = grid;
-            WidgetRuleCards.Children.Add(button);
+            card.Click += WidgetRuleButton_Click;
+            WidgetRuleCards.Children.Add(card);
         }
 
         if (widgets.Count == 0)
@@ -166,6 +146,57 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
             : string.Empty;
         RuleStatusInfo.IsOpen = true;
         Refresh();
+    }
+
+    private void RefreshAutoIntervalOptions(SettingsService settingsService)
+    {
+        AutoIntervalComboBox.Items.Clear();
+        int selected = DesktopAutoOrganizationPolicy.NormalizeDelaySeconds(
+            settingsService.Settings.DesktopOrganization.DesktopAutoOrganizationDelaySeconds);
+        int selectedIndex = 0;
+        for (int index = 0;
+             index < DesktopAutoOrganizationPolicy.SupportedDelaySeconds.Length;
+             index++)
+        {
+            int seconds = DesktopAutoOrganizationPolicy.SupportedDelaySeconds[index];
+            AutoIntervalComboBox.Items.Add(new ComboBoxItem
+            {
+                Content = GetAutoIntervalDisplayName(seconds),
+                Tag = seconds
+            });
+            if (seconds == selected)
+            {
+                selectedIndex = index;
+            }
+        }
+
+        AutoIntervalComboBox.SelectedIndex = selectedIndex;
+        AutoIntervalComboBox.IsEnabled = AutoOrganizationToggle.IsOn;
+    }
+
+    private static string GetAutoIntervalDisplayName(int seconds) => seconds switch
+    {
+        DesktopAutoOrganizationPolicy.DefaultDelaySeconds =>
+            T("DesktopOrganization.Auto.Interval.Realtime"),
+        60 => T("DesktopOrganization.Auto.Interval.Minute"),
+        12 * 60 * 60 => Format("DesktopOrganization.Auto.Interval.Hours", 12),
+        _ => Format("DesktopOrganization.Auto.Interval.Minutes", seconds / 60)
+    };
+
+    private async void AutoIntervalComboBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (_isRefreshing ||
+            AutoIntervalComboBox.SelectedItem is not ComboBoxItem { Tag: int seconds })
+        {
+            return;
+        }
+
+        var service = global::DeskBox.App.Current.SettingsService;
+        service.Settings.DesktopOrganization.DesktopAutoOrganizationDelaySeconds =
+            DesktopAutoOrganizationPolicy.NormalizeDelaySeconds(seconds);
+        await service.SaveAsync();
     }
 
     private void OrganizeNowButton_Click(object sender, RoutedEventArgs e)
@@ -222,6 +253,7 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
             RuleStatusInfo.Title = T("DesktopOrganization.Public.UndoPendingTitle");
             RuleStatusInfo.Message = Format("DesktopOrganization.Public.UndoPending", ex.RestoredCount, ex.RemainingCount);
             RuleStatusInfo.IsOpen = true;
+            AttachAbandonRestoreAction(historyId);
             Refresh();
         }
         catch (Exception ex)
@@ -234,6 +266,67 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
             RuleStatusInfo.IsOpen = true;
             UndoOrganizationButton.IsEnabled = true;
         }
+    }
+
+    // A restore that can never finish (files moved away by hand) used to
+    // keep "开始整理" disabled forever; this action is the way out.
+    private void AttachAbandonRestoreAction(string historyId)
+    {
+        var abandon = new Button
+        {
+            Content = T("DesktopOrganization.Public.AbandonRestore")
+        };
+        abandon.Click += async (_, _) =>
+        {
+            abandon.IsEnabled = false;
+            try
+            {
+                var app = global::DeskBox.App.Current;
+                var entry = app.SettingsService.OrganizationHistory.Entries
+                    .FirstOrDefault(candidate => string.Equals(candidate.Id, historyId, StringComparison.Ordinal));
+                if (entry is not { CanUndo: true } || app.WidgetManager is not { } widgetManager)
+                {
+                    Refresh();
+                    return;
+                }
+
+                if (!await Controls.DesktopOrganizationAbandonDialog.ConfirmAsync(
+                        XamlRoot,
+                        app.LocalizationService,
+                        Controls.DesktopOrganizationAbandonDialog.BuildItemDetails(app.LocalizationService, entry)))
+                {
+                    abandon.IsEnabled = true;
+                    return;
+                }
+
+                var coordinator = new DesktopOrganizationCoordinator(
+                    app.SettingsService,
+                    app.FileService,
+                    widgetManager,
+                    app.OrganizerService,
+                    app.LocalizationService);
+                await coordinator.AbandonUndoAsync(historyId);
+                RuleStatusInfo.ActionButton = null;
+                RuleStatusInfo.Severity = InfoBarSeverity.Success;
+                RuleStatusInfo.Title = T("DesktopOrganization.Public.AbandonDone");
+                RuleStatusInfo.Message = string.Empty;
+                RuleStatusInfo.IsOpen = true;
+            }
+            catch (Exception ex)
+            {
+                App.Log($"[DesktopOrganization] Abandon restore from settings failed: {ex}");
+                RuleStatusInfo.ActionButton = null;
+                RuleStatusInfo.Severity = InfoBarSeverity.Error;
+                RuleStatusInfo.Title = T("DesktopOrganization.Undo.Failed");
+                RuleStatusInfo.Message = T("DesktopOrganization.Undo.FailedBody");
+                RuleStatusInfo.IsOpen = true;
+            }
+            finally
+            {
+                Refresh();
+            }
+        };
+        RuleStatusInfo.ActionButton = abandon;
     }
 
     private void WidgetSearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
@@ -284,6 +377,7 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
         RuleListPanel.Visibility = Visibility.Collapsed;
         RuleDetailPanel.Visibility = Visibility.Visible;
         RuleStatusInfo.IsOpen = false;
+        ResetHostScrollToTop();
         RuleDetailTitle.Text = _selectedWidget.Name;
         RuleDetailPath.Text = _selectedWidget.MappedFolderPath ?? string.Empty;
         _isRefreshing = true;
@@ -294,6 +388,25 @@ public sealed partial class DesktopOrganizationSettingsSection : UserControl
         BuildExtensionChips();
         BuildExcludedExtensionChips();
         BuildRuleTokens();
+    }
+
+    /// <summary>
+    /// Drill-down within the section keeps the host page's scroller, which
+    /// route navigation normally resets; entering rule detail must do the
+    /// same so the header starts in view instead of at the list's offset.
+    /// </summary>
+    private void ResetHostScrollToTop()
+    {
+        DependencyObject ancestor = this;
+        while (ancestor is not null)
+        {
+            if (ancestor is ScrollViewer scroller)
+            {
+                scroller.ChangeView(null, 0, null, disableAnimation: true);
+                return;
+            }
+            ancestor = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(ancestor);
+        }
     }
 
     private void BuildSubtypeChecks()

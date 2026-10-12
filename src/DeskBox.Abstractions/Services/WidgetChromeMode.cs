@@ -21,6 +21,11 @@ public static class WidgetChromeModeNames
 {
     public const string MetadataKey = "ChromeMode";
     public const string System = nameof(WidgetChromeMode.System);
+    // Pluginization: this file moved from the host into DeskBox.Abstractions,
+    // so it must stay free of host-only types. The host's own
+    // WidgetChromeKinds (src/DeskBox/Contracts/IAppearanceSettings.cs) holds
+    // the same literal values for the settings combos; nameof() keeps this
+    // copy dependency-free and byte-identical to those values.
     public const string Standard = nameof(WidgetChromeMode.Standard);
     public const string Compact = nameof(WidgetChromeMode.Compact);
     public const string Overlay = nameof(WidgetChromeMode.Overlay);

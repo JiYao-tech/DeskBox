@@ -2,6 +2,7 @@
 
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
@@ -23,6 +24,15 @@ namespace DeskBox.Views;
 public abstract partial class WidgetWindowBase
 {
     private bool _desktopPinnedInputActivationInProgress;
+
+    // WM_MOUSEACTIVATE suppression runs before the same click is routed to
+    // XAML, so without this stamp one suppressed click would run the bottom
+    // reassert twice (native subclass + routed handler). The guard window
+    // only needs to cover the native-message → XAML-dispatch hop of a single
+    // click; anything older is a genuinely new click.
+    private long _desktopPinnedNativeSuppressionTimestamp;
+    private static readonly long DesktopPinnedNativeSuppressionWindowTicks =
+        TimeSpan.FromMilliseconds(150).Ticks;
 
     protected void ConfigureWindowCore()
     {
@@ -57,7 +67,7 @@ public abstract partial class WidgetWindowBase
             0, 0, 0, 0,
             Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE | Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_FRAMECHANGED);
 
-        AppWindow.IsShownInSwitchers = false;
+        WindowShellState.TryHideFromSwitchers(AppWindow);
         ExtendsContentIntoTitleBar = false;
 
         var config = Config;
@@ -70,13 +80,18 @@ public abstract partial class WidgetWindowBase
         var initCenter = new PointInt32(
             initBounds.X + Math.Max(1, initBounds.Width) / 2,
             initBounds.Y + Math.Max(1, initBounds.Height) / 2);
+        // The display-area lookup can come back empty while the topology is in
+        // flux; falling back to the configured bounds keeps the widget instead
+        // of failing its construction.
         var workArea = DisplayArea.GetFromPoint(
             initCenter,
-            DisplayAreaFallback.Nearest).WorkArea;
-        var bounds = WidgetPositioningService.ResolveBounds(
-            config,
-            workArea,
-            WidgetPositioningService.GetAvailableWorkAreas());
+            DisplayAreaFallback.Nearest)?.WorkArea;
+        var bounds = workArea is { } resolvedWorkArea
+            ? WidgetPositioningService.ResolveBounds(
+                config,
+                resolvedWorkArea,
+                WidgetPositioningService.GetAvailableWorkAreas())
+            : initBounds;
         bounds = ExpandContentBoundsToHost(bounds);
         ApplyWindowBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height, persist: false);
 
@@ -204,10 +219,23 @@ public abstract partial class WidgetWindowBase
         {
             ActivateDesktopPinnedWindow(reason);
         }
+        else if (WasRecentlyNativeSuppressed())
+        {
+            // The WM_MOUSEACTIVATE subclass already reasserted the desktop
+            // bottom state for this exact click; the routed event is the
+            // same press, not a new one.
+        }
         else
         {
             RestoreDesktopPinnedBottomState(reason);
         }
+    }
+
+    private bool WasRecentlyNativeSuppressed()
+    {
+        long timestamp = _desktopPinnedNativeSuppressionTimestamp;
+        return timestamp != 0 &&
+            DateTime.UtcNow.Ticks - timestamp < DesktopPinnedNativeSuppressionWindowTicks;
     }
 
     private void RootElement_GotFocusForDesktopPinnedLayer(
@@ -257,13 +285,27 @@ public abstract partial class WidgetWindowBase
         _desktopPinnedInputActivationInProgress = true;
         try
         {
-            if (Win32Helper.GetForegroundWindow() != HWnd)
+            IntPtr foreground = Win32Helper.GetForegroundWindow();
+            if (foreground != HWnd)
             {
-                // Activation is retained for keyboard-oriented controls, but
-                // the HWND is returned to the desktop bottom before this input
-                // dispatch completes, so activation never creates a layer lease.
-                base.Activate();
-                _ = Win32Helper.SetForegroundWindow(HWnd);
+                // 454: after "show desktop" the shell owns the foreground, and
+                // activating this DefView-owned HWND promotes the whole owner
+                // band — the hand-off that can drag a minimized borderless
+                // fullscreen application back to the front. A pointer click
+                // does not need that promotion: the mouse message is already
+                // delivered (MA_NOACTIVATE semantics), and keyboard-oriented
+                // activations still take the full path below.
+                bool pointerOriginOnDesktopForeground =
+                    string.Equals(reason, "routed-pointer", StringComparison.Ordinal) &&
+                    IsDesktopShellRootWindow(foreground);
+                if (!pointerOriginOnDesktopForeground)
+                {
+                    // Activation is retained for keyboard-oriented controls, but
+                    // the HWND is returned to the desktop bottom before this input
+                    // dispatch completes, so activation never creates a layer lease.
+                    base.Activate();
+                    _ = Win32Helper.SetForegroundWindow(HWnd);
+                }
             }
         }
         finally
@@ -272,6 +314,32 @@ public abstract partial class WidgetWindowBase
         }
 
         RestoreDesktopPinnedBottomState(reason);
+    }
+
+    private static bool IsDesktopShellRootWindow(IntPtr windowHandle)
+    {
+        if (windowHandle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        IntPtr current = windowHandle;
+        while (current != IntPtr.Zero)
+        {
+            var className = new System.Text.StringBuilder(256);
+            int length = Win32Helper.GetClassName(current, className, className.Capacity);
+            if (length > 0 &&
+                (string.Equals(className.ToString(), "Progman", StringComparison.Ordinal) ||
+                 string.Equals(className.ToString(), "WorkerW", StringComparison.Ordinal) ||
+                 string.Equals(className.ToString(), "SHELLDLL_DefView", StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            current = Win32Helper.GetParent(current);
+        }
+
+        return false;
     }
 
     private void WidgetWindowBase_ActivatedForDesktopPinnedLayer(
@@ -324,6 +392,12 @@ public abstract partial class WidgetWindowBase
         KeepRaisedUntilDeactivate = false;
         RestoreDesktopLayerWhenIdle = false;
         TopMostSafetyTimer?.Stop();
+        // HWND_BOTTOM also places this widget below every sibling, which
+        // breaks the shadow-safe peer order. Queue a normalization so the
+        // repair cannot leave the group misordered until an unrelated
+        // trigger happens to fix it.
+        App.Current.WidgetManager?.QueueIdleWidgetZOrderNormalization(
+            $"{LogPrefix}-pinned-bottom-reasserted");
         App.LogVerbose(
             $"[ZOrder] {LogPrefix} fixed-layer bottom reasserted reason={reason} " +
             $"hwnd=0x{HWnd.ToInt64():X}");
@@ -343,7 +417,10 @@ public abstract partial class WidgetWindowBase
             // MA_NOACTIVATE keeps the existing foreground application active
             // but still lets the widget receive the mouse message. Reasserting
             // the desktop owner here also repairs any stale owner/Z-order state
-            // without a visible raise-and-restore flash.
+            // without a visible raise-and-restore flash. The stamp lets the
+            // XAML routed handler recognize this same click and skip its own
+            // duplicate reassert.
+            _desktopPinnedNativeSuppressionTimestamp = DateTime.UtcNow.Ticks;
             RestoreDesktopPinnedBottomState("native-pointer-suppressed");
             return new IntPtr(Win32Helper.MA_NOACTIVATE);
         }
@@ -486,8 +563,18 @@ public abstract partial class WidgetWindowBase
 
         if (updateConfig)
         {
-            UpdateConfigBoundsFromPhysical(x, y, width, height, persist: false);
+            // Restore paths may only refresh the physical X/Y cache (spec
+            // 5.2): width/height are placement intent and must survive
+            // topology repositioning untouched, so the write is physical-
+            // position-only here.
+            UpdateConfigPhysicalPositionOnly(x, y);
         }
+    }
+
+    private void UpdateConfigPhysicalPositionOnly(int x, int y)
+    {
+        Config.X = x;
+        Config.Y = y;
     }
 
     protected SizeInt32 GetPhysicalMinimumWindowSize(int x, int y, int width, int height)
@@ -530,6 +617,36 @@ public abstract partial class WidgetWindowBase
         {
             WidgetPositioningService.CaptureAnchor(Config, bounds, workArea);
         }
+    }
+
+    /// <summary>
+    /// Unified user-placement commit (spec 5.4): captures the placement with
+    /// max-intersection display ownership, updates the surface's home display
+    /// ("放哪属于哪"), and marks the profile entry authoritative. Expanded
+    /// state captures the main anchor; compact state keeps the capsule
+    /// capture and only commits home/entry.
+    /// </summary>
+    protected void CommitUserPlacementFromWindow(WidgetPlacementSource source)
+    {
+        WidgetManager? manager = App.Current?.WidgetManager;
+        if (manager is null)
+        {
+            return;
+        }
+
+        RectInt32 actual = GetActualWindowBounds();
+        if (IsCompactBoundsStateActive)
+        {
+            CaptureCompactPlacement(actual, persist: false);
+            manager.CommitUserPlacement(Config, actual, actual, source, captureIntent: false);
+            return;
+        }
+
+        manager.CommitUserPlacement(
+            Config,
+            CollapseHostBoundsToContent(actual),
+            actual,
+            source);
     }
 
     // ── Display change restoration ─────────────────────────────
@@ -578,6 +695,12 @@ public abstract partial class WidgetWindowBase
 
     public void RestoreBoundsForCurrentTopology()
     {
+        // A programmatic re-resolve must not trust the memoized capsule
+        // placement: screen-binding changes resolve a different monitor, and
+        // the stale stable-bounds memo would silently pin the collapsed
+        // capsule to its old screen (the pin-all batch missed collapsed
+        // widgets through exactly this path).
+        InvalidateStableCompactBounds();
         _ = TryRestoreBoundsForCurrentTopology(allowHidden: true);
     }
 
@@ -592,6 +715,16 @@ public abstract partial class WidgetWindowBase
 
     // ── AppWindow change handling ──────────────────────────────
 
+    /// <summary>
+    /// True while any bounds write or position transition is still in flight.
+    /// Z-order normalization uses this to avoid sorting on transient bounds
+    /// that would produce a second, different order once the window settles.
+    /// </summary>
+    public bool IsBoundsTransitionActive =>
+        IsApplyingBounds ||
+        TrayAnimation.IsApplyingBounds ||
+        TrayAnimation.IsPositionTransitionActive;
+
     protected void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
         if (args.DidVisibilityChange)
@@ -603,6 +736,14 @@ public abstract partial class WidgetWindowBase
                         ? "native-window-shown"
                         : "native-window-hidden",
                     observedNativeVisibility: sender.IsVisible);
+        }
+
+        // Panorama backgrounds sample the slice under the window, so they
+        // must follow drags and resizes in real time — this runs before the
+        // drag/resize config guards below on purpose.
+        if (args.DidPositionChange || args.DidSizeChange)
+        {
+            UpdateCustomPanoramaViewport();
         }
 
         if (IsApplyingBounds ||

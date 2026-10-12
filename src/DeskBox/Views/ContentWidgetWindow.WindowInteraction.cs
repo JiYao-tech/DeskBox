@@ -3,6 +3,7 @@ using DeskBox.Controls;
 using DeskBox.Controls.WidgetContents;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
@@ -30,7 +31,7 @@ public sealed partial class ContentWidgetWindow
 
     private void RootGrid_DragOver(object sender, DragEventArgs e)
     {
-        if (CurrentContent is FileSurfaceContent file)
+        if (CurrentContent is FileWidgetContentAdapter file)
         {
             // The transparent resize grid sits above the content along every
             // window edge. Reuse the file surface's normal feedback there so
@@ -47,7 +48,9 @@ public sealed partial class ContentWidgetWindow
 
         e.AcceptedOperation = todo.CanImportExternalDrop(e.DataView)
             ? DeskBoxDragData.HasDroppedFiles(e.DataView)
-                ? DeskBoxDragData.GetFileAssociationOperation(e.DataView)
+                ? DeskBoxDragData.GetFileAssociationOperation(
+                    e.DataView,
+                    e.AllowedOperations)
                 : DataPackageOperation.Copy
             : DataPackageOperation.None;
         if (DeskBoxDragData.HasDroppedFiles(e.DataView))
@@ -76,7 +79,7 @@ public sealed partial class ContentWidgetWindow
 
     private async void RootGrid_Drop(object sender, DragEventArgs e)
     {
-        if (CurrentContent is FileSurfaceContent file)
+        if (CurrentContent is FileWidgetContentAdapter file)
         {
             file.HandleHostEdgeDrop(e);
             return;
@@ -105,7 +108,7 @@ public sealed partial class ContentWidgetWindow
 
     private async void RootGrid_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (CurrentContent is FileSurfaceContent fileSurface &&
+        if (CurrentContent is FileWidgetContentAdapter fileSurface &&
             await fileSurface.TryHandleClipboardShortcutAsync(e))
         {
             return;
@@ -354,6 +357,9 @@ public sealed partial class ContentWidgetWindow
         }
 
         _contentHost.OnActivated();
+        // A long-hidden release dropped the decoded custom background; the
+        // surface is cheap to rebuild from disk on the way back in.
+        RecoverCustomBackgroundIfReleased();
         App.Current.WidgetManager?.ReassertRaisedWidgetGroupAfterDeskBoxActivation(
             HWnd,
             "content-window-activated");

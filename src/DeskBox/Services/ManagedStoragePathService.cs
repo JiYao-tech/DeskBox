@@ -1,5 +1,6 @@
 using System.IO;
 using DeskBox.Helpers;
+using DeskBox.Platform;
 
 namespace DeskBox.Services;
 
@@ -78,6 +79,18 @@ internal static class ManagedStoragePathService
         }
 
         return accountFolder;
+    }
+
+    /// <summary>
+    /// True when the candidate storage root is the user desktop, the common
+    /// (public) desktop, or a subfolder of either. The desktop organizer
+    /// sweeps those folders on every run, so such a root would re-ingest its
+    /// own managed folders and the organization transaction rejects it.
+    /// </summary>
+    public static bool OverlapsDesktop(string path)
+    {
+        return IsSameOrDescendant(path, Environment.GetFolderPath(Environment.SpecialFolder.Desktop)) ||
+            IsSameOrDescendant(path, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
     }
 
     public static ManagedStoragePathAssessment AssessPath(string path)

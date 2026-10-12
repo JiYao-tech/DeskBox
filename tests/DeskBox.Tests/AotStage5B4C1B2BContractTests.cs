@@ -1,4 +1,4 @@
-namespace DeskBox.Tests;
+﻿namespace DeskBox.Tests;
 
 public sealed class AotStage5B4C1B2BContractTests
 {
@@ -45,7 +45,7 @@ public sealed class AotStage5B4C1B2BContractTests
         Assert.Contains("SHOP_FILEPATH", helper, StringComparison.Ordinal);
         Assert.Contains("AotFilePropertiesFixture.TryBeginInvocation", helper, StringComparison.Ordinal);
         Assert.Contains("AotFilePropertiesFixture.RecordInvocationResult", helper, StringComparison.Ordinal);
-        Assert.Contains("bool invoked = SHObjectProperties", helper, StringComparison.Ordinal);
+        Assert.Contains("bool invoked = Shell32NativeMethods.SHObjectProperties", helper, StringComparison.Ordinal);
         Assert.DoesNotContain("TaskDialog", helper, StringComparison.Ordinal);
     }
 
@@ -74,7 +74,7 @@ public sealed class AotStage5B4C1B2BContractTests
     {
         string fixture = ReadRepositoryFile(
             "src/DeskBox/Services/AotFilePropertiesFixture.cs");
-        string win32 = ReadRepositoryFile("src/DeskBox/Helpers/Win32Helper.cs");
+        string win32 = ReadRepositoryFile("src/DeskBox/Platform/Win32Helper.cs");
 
         Assert.Contains("CaptureVisibleTopLevelWindowHandles", fixture, StringComparison.Ordinal);
         Assert.Contains("ObserveAndCloseOwnedDialogAsync", fixture, StringComparison.Ordinal);
@@ -140,7 +140,7 @@ public sealed class AotStage5B4C1B2BContractTests
         Assert.Contains("run-aot-file-properties-smoke.ps1", master, StringComparison.Ordinal);
         Assert.Contains("[Guid]::NewGuid().ToString(\"N\")", runner, StringComparison.Ordinal);
         Assert.Contains("file-properties-preview-$runId", runner, StringComparison.Ordinal);
-        Assert.Contains("profile 49 / schema 46", runner, StringComparison.Ordinal);
+        Assert.Contains("profile 64 / schema 55", runner, StringComparison.Ordinal);
         Assert.Contains("Refusing to replace an existing file Properties preview root", runner, StringComparison.Ordinal);
         Assert.Contains("Refusing to replace an existing file Properties recovery root", runner, StringComparison.Ordinal);
         Assert.Contains("properties-$runId.txt", runner, StringComparison.Ordinal);
@@ -197,13 +197,13 @@ public sealed class AotStage5B4C1B2BContractTests
         string launcher = ReadRepositoryFile("scripts/start-aot-preview.ps1");
         string project = ReadRepositoryFile("src/DeskBox/DeskBox.csproj");
 
-        Assert.Contains("$auditProfileVersion = 63", audit, StringComparison.Ordinal);
+        Assert.Contains("$auditProfileVersion = 64", audit, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4C1B2BMissingRunnerPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4C1B2BForbiddenScopePatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4C1B2BRustAbiUnchanged", audit, StringComparison.Ordinal);
-        Assert.Contains("stage5B4C1B2BExpectedWmc1510Count = 867", audit, StringComparison.Ordinal);
-        Assert.Contains("$RequiredAuditProfileVersion = 63", launcher, StringComparison.Ordinal);
+        Assert.Contains("stage5B4C1B2BExpectedWmc1510Count = 875", audit, StringComparison.Ordinal);
+        Assert.Contains("$RequiredAuditProfileVersion = 64", launcher, StringComparison.Ordinal);
         Assert.Contains("$RequiredSummarySchemaVersion = 55", launcher, StringComparison.Ordinal);
         Assert.Contains("stage 5B-4C3B2B1", project, StringComparison.Ordinal);
         Assert.Contains("actual SHObjectProperties dialog", project, StringComparison.Ordinal);

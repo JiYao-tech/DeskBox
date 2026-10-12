@@ -255,7 +255,9 @@ internal static unsafe class NativeHostApiBridge
             {
                 Microsoft.UI.Xaml.ElementTheme.Light => false,
                 Microsoft.UI.Xaml.ElementTheme.Dark => true,
-                _ => Helpers.Win32Helper.IsSystemDarkMode(),
+                // Upstream 1.5.x moved Win32Helper from DeskBox.Helpers to
+                // DeskBox.Platform; AccentColorHelper stayed in Helpers.
+                _ => DeskBox.Platform.Win32Helper.IsSystemDarkMode(),
             };
             string accent = Helpers.AccentColorHelper.ToHex(
                 themeService?.GetEffectiveAccentColor() ?? Helpers.AccentColorHelper.DefaultAccentColor);

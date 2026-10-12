@@ -1,18 +1,19 @@
 # DeskBox
 
-**A free, open-source Windows desktop organizer with native-feeling WinUI 3 widgets.**
+**A free, open-source, local-first Windows desktop organizer with native-feeling WinUI 3 widgets.**
 
 English | [简体中文](README.zh-CN.md)
 
 > External pull requests are not being merged at this time — bug reports, ideas, and discussions are very welcome via Issues / Discussions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [![CI](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml/badge.svg)](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/badge/release-1.5.0-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.0)
+[![Release 1.5.6](https://img.shields.io/badge/release-1.5.6-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.6)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4.svg)](#system-requirements)
 [![x64 and ARM64](https://img.shields.io/badge/architecture-x64%20%7C%20ARM64-5C2D91.svg)](#download)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Tianyu199509/DeskBox?style=flat&color=yellow)](https://github.com/Tianyu199509/DeskBox/stargazers)
 [![Downloads](https://img.shields.io/github/downloads/Tianyu199509/DeskBox/total?style=flat&color=brightgreen)](https://github.com/Tianyu199509/DeskBox/releases)
+<a href="https://hellogithub.com/repository/Tianyu199509/DeskBox" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=f0cae3cb81f3496b9b6ead91194dc6f8&claim_uid=x4er8iQsXYT3aMN&theme=small" alt="Featured｜HelloGitHub" /></a>
 
 ![DeskBox Windows desktop organizer with file, todo, search, weather, and music widgets](docs/images/brand/readme-hero-1-3-7-dark-en.png)
 
@@ -31,7 +32,7 @@ DeskBox uses native-feeling Windows materials and keeps ordinary desktop files a
 | | |
 | --- | --- |
 | **Platform** | Windows 10/11, x64 and ARM64 |
-| **Technology** | C#, WinUI 3, .NET 10 Native AOT, Windows App SDK 2.4, Rust native Shell layer |
+| **Technology** | C#, WinUI 3, .NET 10 Native AOT, Windows App SDK 2.5.1, Rust native Shell layer |
 | **Storage model** | Local-first; files, notes, tasks, settings, and layouts remain on the PC |
 | **Languages** | English, Simplified Chinese, Traditional Chinese, Japanese, German, Brazilian Portuguese, Hindi, Spanish, French, Arabic, Bengali, Russian |
 | **License** | GPL-3.0-only |
@@ -40,14 +41,14 @@ All twelve selectable languages share the same resource-key and formatting-place
 
 ## Download
 
-The current stable release is DeskBox 1.4.9, available from [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.4.9).
+DeskBox 1.5.6 is prepared for release. The [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.6) download links below will become available after publication.
 
-- [DeskBox 1.4.9 for x64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.4.9/DeskBox_Setup_1.4.9_x64.exe), recommended for most Intel and AMD PCs.
-- [DeskBox 1.4.9 for ARM64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.4.9/DeskBox_Setup_1.4.9_arm64.exe), recommended for Snapdragon, Surface Pro X, and other Windows on ARM PCs.
+- [DeskBox 1.5.6 for x64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.6/DeskBox_Setup_1.5.6_x64.exe), recommended for most Intel and AMD PCs.
+- [DeskBox 1.5.6 for ARM64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.6/DeskBox_Setup_1.5.6_arm64.exe), recommended for Snapdragon, Surface Pro X, and other Windows on ARM PCs.
 
-Both packages are Full Native AOT builds with the matching private Windows App Runtime 2.4, so they can install offline without downloading a separate .NET 10 or Windows App Runtime package.
+Both packages are Full Native AOT builds with the matching private Windows App Runtime 2.5.1, so they can install offline without downloading a separate .NET 10 or Windows App Runtime package.
 
-Every release also publishes a matching `.sha256` sidecar for each installer. The installers are currently unsigned, so verify the hash before running one if that matters to you.
+Every release publishes a matching `.sha256` sidecar for each installer. Code signing is integrated via SignPath: starting with the first release published after the production certificate is issued, installers are signed by the SignPath Foundation; until then, verify the hash before running an installer. See the [code signing policy](docs/code-signing.md) for details.
 
 > DeskBox itself installs for the current user by default.
 
@@ -59,8 +60,9 @@ Every release also publishes a matching `.sha256` sidecar for each installer. Th
 - Use icon or list layouts, title styles, detail and path controls, manual or rule-based sorting, compact display density, per-widget icon size override, and one-line, two-line, or hidden file names. Widgets resize down to 50×50.
 - Reorder items directly, move or copy them into a folder item, and create a folder with automatic scrolling and inline naming. Manual order is restored after restart.
 - Stack files manually, or let automatic grouping do it as a separate opt-in switch. A stack can expand inside the widget or open as an Adaptive, 3×3, or 5×5 popover that shares the grid's icon size, density, selection, and Ctrl+mouse-wheel behavior and stays within screen edges.
-- Drag files and shortcuts in or out, copy, cut, paste, rename, delete, and reveal in Explorer. Dragging can follow the Windows default copy-or-move decision, including cross-volume behavior and modifier-key shortcut creation, with native drop images and target descriptions.
+- Drag files and shortcuts in or out, copy, cut, paste, rename, delete, and reveal in Explorer. Dragging can follow the Windows default copy-or-move decision, including cross-volume behavior and modifier-key shortcut creation, with native drop images and target descriptions. Drop files onto an application shortcut tile to open them with that application; drag-out modifier hints and result toasts can be turned off in Settings.
 - Shell copy and move operations show per-item progress while keeping the source, destination, and receiving folders protected from conflicting changes.
+- Move existing files into managed storage through a copy-first migration with preview, per-phase progress, verification, and resumable retry; the source is never auto-deleted. Choosing a storage root on a network drive, a removable disk, the system drive, or a desktop-overlapping folder warns up front.
 - Create shortcuts, permanently delete with confirmation and partial-result reporting, run a supported executable as administrator, or open the rest of the native Shell menu near the pointer.
 - Drop content from Explorer, WeChat, or a browser; remote image and file URLs can be downloaded and imported.
 - Preview supported files through a running [QuickLook](https://github.com/QL-Win/QuickLook) instance by pressing Space.
@@ -71,19 +73,19 @@ Every release also publishes a matching `.sha256` sidecar for each installer. Th
 - Detach a member or dissolve a group safely; grouped and standalone file widgets share the same views, settings, menus, sorting, drag-and-drop, and QuickLook behavior.
 - Preview desktop organization by category before moving anything, and choose whether each category creates a folder or reuses an existing widget.
 - Optionally include retained folders, large files, and items beyond the quick batch, and get access-denied, in-use, changed, unavailable, or failed transfers explained separately instead of a silent skip.
-- Optionally organize new desktop files after downloads, extraction, and same-path replacements reach a stable state.
+- Optionally organize new desktop files after downloads, extraction, and same-path replacements reach a stable state, with a configurable dwell from real-time to 12 hours.
 
 ### Todo and Quick Capture
 
 - Work in responsive Todo and Quick Capture list/detail layouts that switch between single- and dual-pane modes, with an adjustable master pane on wide widgets.
-- Track tasks with due dates, reminders, recurrence, color markers, Markdown notes, attachments, filters, and batch actions.
+- Track tasks with due dates, reminders, recurrence, color markers, Markdown notes, multi-item attachments, filters, and batch actions.
 - Save reusable text, links, images, and files in Quick Capture with pinning, paper styles, Markdown editing and preview, removable attachments, and focused editing.
 - Keep attachment files linked to their original location or copy them into DeskBox-managed storage.
 
 ### Desktop search
 
 - Search files, folders, applications, settings, notes, and todos from one popup or search widget.
-- File results come from Everything's existing local index over IPC and merge with DeskBox content in the same window. DeskBox no longer maintains a duplicate file index.
+- File results come from Everything's existing local index over IPC and merge with DeskBox content in the same window, without a duplicate file index on DeskBox's side.
 - Everything is detected or launched from Settings, where you can choose its executable, see connection and permission status, opt into advanced syntax, and filter low-value system and cache paths. Everything itself is not bundled and must be installed separately.
 - Use configurable filters, sortable detail columns, result limits, history, favorites, and a global search hotkey.
 - Select multiple rows with Ctrl or Shift, drag a selection rectangle with edge auto-scroll, and apply batch actions to the result set.
@@ -92,9 +94,9 @@ Every release also publishes a matching `.sha256` sidecar for each installer. Th
 
 ### Glance, weather, and music
 
-- Glance keeps the date, weekday, lunar calendar, and festivals visible, with your own background image or rotation and an independent image transparency control.
+- Glance keeps the date, weekday, lunar calendar, solar terms, and festivals visible, with your own background image or rotation and an independent image transparency control.
 - View current conditions plus hourly and multi-day forecasts with MSN Weather and automatic Open-Meteo fallback.
-- Choose a theme-aware Standard weather skin or the richer condition-based skin, with responsive Day and Week views across widget sizes. Startup shows a fresh cached forecast immediately and keeps refresh work off the interaction path.
+- Choose a theme-aware Standard weather skin or the richer condition-based skin, and pick one of four bundled weather icon styles — Fluent, DeskBox line-art, Meteocons Flat, and Meteocons Line — that render identically on Windows 10 and 11. Responsive Day and Week views adapt across widget sizes; startup shows a fresh cached forecast immediately and keeps refresh work off the interaction path.
 - Control the active Windows media session, playback mode, progress, and system volume from the music widget, or switch between available media sessions and follow the system-selected source.
 - Use responsive cover, controls, record, and compact layouts with optional album-color ambience.
 
@@ -104,17 +106,19 @@ Every release also publishes a matching `.sha256` sidecar for each installer. Th
 - Show key information, a short summary, or only an icon and title; hide sensitive Todo and Quick Capture text while collapsed.
 - Arrange capsules independently or combine them into a movable, ordered bar.
 - A hover-expanded capsule or group stays open while you use a stack popover, context menu, drag operation, title editor, or close confirmation, and collapses only after the interaction ends and the pointer has left.
-- Raise or hide all widgets from the tray, F7, double Ctrl, Alt+Space, Win+Space, a single Win-key tap, a custom shortcut, or an optional double-click on a blank desktop area. Reserved Windows combinations warn about their system-side effect before you enable them, and modifier-only or incomplete taps are ignored.
+- Raise or hide all widgets from the tray, F7, double Ctrl, Alt+Space, Win+Space, a single Win-key tap, a custom shortcut captured with a PowerToys-style recorder that safely intercepts system chords mid-recording, or an optional double-click on a blank desktop area. Reserved Windows combinations warn about their system-side effect before you enable them, and modifier-only or incomplete taps are ignored.
 - Quick Reveal temporarily shows widgets above other windows without permanently changing their desktop-layer behavior, and keeps the first activating click instead of losing it.
 - Serialized repeated-toggle handling and recovery cover display, DPI, sleep, and Explorer changes.
-- Customize Mica/acrylic materials, opacity, borders, DWM corners, animation, title bars, icon size, and text size. Widget text and monochrome controls can follow the app theme or use light, dark, custom, and per-widget colors, with an optional text edge treatment.
+- Customize Mica/acrylic materials, opacity, DWM corners, animation, title bars, icon size, and text size. Swap any widget's icon for an emoji or a local image, give it its own background image with fit and dim controls, choose global background modes (follow the material, one unified image, or a panorama where each widget frames its own slice of the image by its position on the desktop), and pick border styles with an optional text shadow. Widget text and monochrome controls can follow the app theme or use light, dark, custom, and per-widget colors, with an optional text edge treatment.
 
 ### Layout, displays, and performance
 
-- DeskBox stores a separate widget layout for each known monitor topology. Reconnecting a display arrangement restores the positions, sizes, group surfaces, and capsule placement saved for it. Hot-plug, work-area, and DPI changes settle before restore, and layout writes pause during the transition so temporary coordinates cannot overwrite a saved layout.
+- Widgets belong to their display. Drag a widget to a screen and that screen becomes its home; every combination of connected displays keeps its own arrangement. Unplug a display and, after a grace period, its widgets relocate proportionally to a remaining screen or collapse into capsules; plug it back in and every widget returns to its exact spot. A first-seen combination seeds onto the most similar display instead of piling onto the primary.
+- Windows-side display changes leave placed widgets where they are: switching the primary display, resolution and scale changes, monitor rearranging, lock-screen and sleep re-enumerations, and full-screen games that change the resolution. Only widgets set to always follow the main display move.
+- A Displays page in Settings previews the arrangement with per-screen widget lists, flashes a number on each screen to identify it, pins every widget to the current layout in one click, and sets a default display for new widgets. Widgets and groups can also bind to a display from the context menu — bindings follow display hardware identity and survive sleep, reconnects, and Windows renumbering. "Move all widgets to this display" maps positions proportionally, shows friendly device names, and is undoable.
 - A replacement or differently scaled monitor receives a proportional in-bounds layout instead of leaving widgets off-screen.
 - Hold Ctrl while dragging a widget title to move every eligible widget on the current display as one bounded group. Snapping works while moving as well as resizing, with a configurable gap and screen-edge protection.
-- Choose Balanced, Resource saver, or Custom performance modes. Custom controls hidden-widget cache cleanup, visible-idle cleanup, transient-window release, icon/thumbnail/image cache budget, and individual continuous animations such as text marquee, vinyl rotation, Glance image rotation, and capsule effects.
+- Settings → General offers Balanced, Resource saver, or Custom performance modes. Custom controls hidden-widget cache cleanup, visible-idle cleanup, transient-window release, icon/thumbnail/image cache budget, and individual continuous animations such as text marquee, vinyl rotation, Glance image rotation, and capsule effects.
 - Hidden and inactive widgets release recreatable UI surfaces, decoded images, icons, and thumbnails according to the selected policy, while process-wide WinRT settings reuse, shared brushes, cached window factories, and targeted list updates keep the hot paths quiet. Animation pacing adapts to the current display's refresh rate, with extra frame-pacing and backdrop safeguards on Windows 10.
 - Startup waits for Explorer's desktop icon host to stabilize before attaching desktop-layer widgets, so widget restoration does not disturb Windows' own icon-position recovery. If the managed storage drive is temporarily disconnected, widgets stay intact and recover once it returns.
 
@@ -122,56 +126,24 @@ Every release also publishes a matching `.sha256` sidecar for each installer. Th
 
 - Check for updates in the app, read long release notes in a dedicated view, retry failed downloads, or continue from the official website.
 - Start a visible installer after DeskBox closes; upgrades reuse and lock the existing installation path instead of creating a second copy.
-- Back up and restore settings, and export a privacy-filtered diagnostics package for troubleshooting.
+- Back up and restore settings locally, or back up todos, quick captures, and widget styles to your own WebDAV server on a schedule; passwords live in Windows Credential Manager, each data domain toggles independently, and remote snapshots can be browsed and restored in merge or snapshot-faithful mode.
+- Export a privacy-filtered diagnostics package for troubleshooting.
 - Recover settings from resilient snapshots, flush pending changes during shutdown, and report save failures instead of silently reverting to defaults.
 
-## What's new in 1.5.0
+## What's new in 1.5.6
 
-- **Automatic data snapshots.** Backups now run on a configurable schedule (every 5 minutes to every 5 days) with 3–30 retained snapshots and an optional custom directory that falls back safely with a notification when unavailable.
-- **Redesigned Organize Desktop with Public Desktop support.** A desktop preview card with clear per-file selection, re-scans that keep your choices, resumable interrupted operations, and an optional shared Public Desktop source.
-- **Folder shortcuts navigate in place.** A `.lnk` pointing inside the widget's own tree opens inside the file widget instead of File Explorer.
-- **Sharper, correct icons.** Files, folders, and `desktop.ini` custom icons use 256-px Shell icons with overlays; `.url` icons (including Steam covers) resolve through the Shell.
-- **More control over text and menus.** Independent list/content text sizes for Quick Capture and Todo, a Glance clock 12/24-hour format option, and an optional native Windows context menu for single file tiles.
-- **Reliable rename and drag completion.** Inline rename fields receive typing reliably in every entry point, and internal reorders can no longer trigger Shell shortcut cleanup.
-- **Lower memory, faster Settings.** Settings sections load on demand and search works before sections are created; thumbnail payloads read zero-copy, and widget title bars are more compact.
+- **Widgets belong to their display.** Drag a widget to a screen and that screen becomes its home; every combination of connected displays keeps its own layout, an unplugged screen's widgets collapse or relocate gracefully, and everything returns to its exact spot when it reconnects. A new Displays page in Settings identifies screens, pins layouts in one click, and sets a default screen for new widgets.
+- **Dress up your widgets.** Swap any widget's icon for an emoji or a local image, give widgets their own backgrounds, choose global background modes (material, unified image, or a panorama where each widget frames its own slice of the image), and add border styles and a text shadow.
+- **Quieter, safer starts.** Start silently with Windows and summon everything back from the tray or hotkey; an elevated launch explains itself and restarts at normal privileges in one click; migrating files into managed storage is now a verified copy-first flow that never auto-deletes the source.
+- **More polish.** Four bundled weather icon styles, PowerToys-style hotkey recording, undoable "move all widgets to this display", and a reorganized Settings window with accordions.
+- **File-safety hardening.** A pre-release audit round closed every reachable data-loss path it found: full restores can no longer apply unconfirmed, deleting search results follows the Windows confirmation even on volumes without a Recycle Bin, network-drive widget folders no longer bypass the bin, attachment removal only ever touches managed copies, and a failed move-back keeps the widget intact with a clear message.
+- **Platform.** Windows App Runtime 2.5.1; the minimum supported Windows 10 build is now 19041 (version 2004).
 
-## What's new in 1.4.9
-
-- **Reliable drag operations on Windows 10 and Windows 11.** A drag now advertises one preferred shell operation through `RequestedOperation`, avoiding the Windows 10 Copy/Move/Create-shortcut chooser without narrowing the destinations DeskBox supports.
-- **No more misplaced shortcuts.** Internal reorder feedback is separated from filesystem completion, so `.lnk` items can no longer be moved to the Recycle Bin during an in-grid or in-stack reorder.
-- **Explicit stack routes in both display modes.** Inline stacks and stack popovers support reorder, stack-to-parent-grid, grid-to-stack, other-grid, desktop, and File Explorer routes.
-- **Windows 10 Native AOT packaging is complete.** Direct packages include the required Windows App Runtime Insights resource, and the Native AOT audit verifies the retained binding and drag-surface contracts.
-- **Settings window no longer leaks.** The Settings window is reused, so repeated open/close cycles do not retain native XAML trees; idle deep cleanup and memory compression are reliable again.
-- **Safer file interactions.** File opening is gated and traced, extension-changing renames require confirmation, and stack popovers support in-place rename.
-
-## What's new in 1.4.8
-
-- **Safer managed-storage handoff.** DeskBox can keep a standalone `DeskBox Files.lnk` shortcut to the managed storage folder, and the uninstaller offers to create one for older users when managed files remain.
-- **Windows 10 corner compatibility.** Windows 10 uses square outer and capsule media corners while Windows 11 continues to follow the saved corner preferences.
-- **Simpler weather default.** New installations and restored defaults use the Standard weather skin; the richer skin remains selectable.
-- **More reliable search keyboard navigation.** Arrow keys keep the selected result and its highlight synchronized, while Ctrl+Tab changes search tabs without leaving arrow keys controlling only the scroll view.
-- **Cleaner search tabs.** Search tabs are text-only, content-sized, and use a taller indicator with consistent horizontal spacing.
-- **Safer Windows integration.** This release also includes junction/symbolic-link traversal fixes, Shell-owned confirmation dialogs, watcher backoff, virtual-display recovery, and high-DPI stack layout fixes.
-
-## What's new in 1.4.7
-
-- **Safer More system operations.** Extended Windows Shell context menus now run in an isolated helper process, so a faulty third-party Shell extension cannot terminate DeskBox.
-- **Reliable high-DPI stack grids.** A 3×3 popover with five files keeps the expected 3+2 arrangement at fractional DPI scales instead of wrapping as 2+2+1.
-- **Stable desktop-layer transitions.** Hidden widgets remain hidden during Explorer drag and activation changes, while expanded capsules retain their peer ordering.
-- **Native AOT calendar bindings.** Glance calendar day decorations retain their binding metadata in Direct Native AOT builds.
-- **Fixed a serious shortcut loss.** Dragging a `.lnk` shortcut between widgets could delete the original on some systems. DeskBox now waits for a transfer to finish before reporting the operation result to Windows, so the source is never cleaned up early.
-- **Performance modes.** Balanced, Resource saver, and Custom modes under Settings → General control cache retention, transient-window release, and individual continuous animations. Hidden and inactive surfaces release recreatable UI, icons, and decoded images.
-- **Multi-display layout memory.** Each known monitor topology keeps its own layout, so positions, sizes, groups, and capsule placement return when you reconnect a display arrangement. New or differently scaled monitors get an in-bounds proportional layout.
-- **More ways to summon DeskBox.** F7, double Ctrl, Alt+Space, Win+Space, a Win-key tap, a custom shortcut, or an optional double-click on a blank desktop area, plus a Quick Reveal layer that temporarily raises widgets above other windows.
-- **File stacking 2.0.** Manual stacking and automatic grouping are now separate switches. A stack can open inline or in an Adaptive, 3×3, or 5×5 popover that shares the file grid's icon size, density, selection, and Ctrl+wheel behavior.
-- **Everything-powered file search.** DeskBox reads Everything's existing index over local IPC and merges it with notes, todos, and settings in one window, replacing the duplicate DeskBox-maintained index. Everything is not bundled.
-- **Native AOT Direct builds.** GitHub packages no longer need a separate .NET 10 runtime; Windows App Runtime moved to 2.4.
-
-Read the complete [changelog](CHANGELOG.md) or the [1.4.9 release notes](docs/releases/v1.4.9.md).
+Read the complete [changelog](CHANGELOG.md) or the [1.5.6 release notes](docs/releases/v1.5.6.md).
 
 ## Current interface
 
-These screenshots are representative of the current DeskBox settings interface.
+Settings pages fold low-frequency options into expandable accordions, and the built-in search box finds any setting. The screenshots below will be refreshed for the reorganized 1.5.6 settings window.
 
 ### Settings
 
@@ -189,7 +161,7 @@ These screenshots are representative of the current DeskBox settings interface.
 
 ## Local-first data and privacy
 
-DeskBox does not require an account or cloud synchronization. Widget configuration, todos, quick notes, search history, layouts, and managed files are stored locally.
+DeskBox does not require an account or cloud synchronization. Widget configuration, todos, quick notes, search history, layouts, and managed files are stored locally; the optional WebDAV backup, when you configure it, only ever contacts your own server.
 
 Some actions intentionally use the network:
 
@@ -202,21 +174,21 @@ Capsule privacy mode hides selected text in the collapsed presentation; it is a 
 
 ## System requirements
 
-- Windows 10 version 21H2 (build 19044) or later; Windows 11 version 22H2 or later for the full visual treatment.
+- Windows 10 version 2004 (build 19041) or later; Windows 11 version 22H2 or later for the full visual treatment. Older Windows 10 releases past end of servicing (2004/20H2/21H1) still install and run, but upgrading to 22H2 or later is recommended.
 - x64 or ARM64 processor matching the installer.
-- Windows App Runtime 2.4. DeskBox 1.4.8 and later Full installers include a private matching runtime, and Native AOT requires no separate .NET 10 runtime.
+- Windows App Runtime 2.5.1. DeskBox 1.4.8 and later Full installers include a private matching runtime, and Native AOT requires no separate .NET 10 runtime.
 
 On Windows 10, unsupported materials, rounded corners, and some animations automatically fall back to compatible visuals; file sync, drag-and-drop, and core widget behavior are validated against the compatibility floor.
 
 ## Installation, updates, and removal
 
-DeskBox uses an Inno Setup installer and installs for the current user by default. Overwrite installation preserves app settings, widget configuration, and managed storage. Older administrator-level installations under Program Files are migrated to avoid elevated-process drag-and-drop restrictions.
+DeskBox uses an Inno Setup installer and installs for the current user by default. Overwrite installation preserves app settings, widget configuration, and managed storage. Older administrator-level installations under Program Files are migrated to avoid elevated-process drag-and-drop restrictions. If DeskBox itself is launched as administrator, it explains that drag and drop with Explorer is blocked and offers a one-click restart at normal privileges; autostart instances restart themselves automatically.
 
-Startup launch is tray-first and silent. If DeskBox is already running, a second startup instance exits instead of opening another settings window.
+Startup launch is tray-first and can start silently, keeping widgets hidden until the first tray click, hotkey, or app activation. If DeskBox is already running, a second startup instance exits instead of opening another settings window.
 
 Auto-start uses a per-user Run entry, so DeskBox appears in **Settings → Apps → Startup**. Legacy scheduled-task registrations migrate automatically when it is safe to do so, and disabling DeskBox from Windows is reflected by the in-app switch.
 
-Uninstall offers explicit choices to keep application data or permanently remove it. Permanent removal clears `%LocalAppData%\DeskBox`, `%LocalAppData%\DeskBox-Recovery`, temporary files, and DeskBox-owned registration data; user files in the managed storage path are always preserved. Silent uninstall keeps application data unless an administrator explicitly supplies `/PURGEUSERDATA`.
+Uninstall offers explicit choices to keep application data or permanently remove it. The direct-edition uninstaller detects a possibly-installed Microsoft Store edition and conservatively keeps app data in that case. Permanent removal clears `%LocalAppData%\DeskBox`, `%LocalAppData%\DeskBox-Recovery`, temporary files, and DeskBox-owned registration data; user files in the managed storage path are always preserved. Silent uninstall keeps application data unless an administrator explicitly supplies `/PURGEUSERDATA`.
 
 ## FAQ
 
@@ -274,8 +246,8 @@ ISCC.exe /DDeskBoxNativeAot=1 /DDeskBoxBundledRuntime=1 /DMyAppReleaseDir=..\.ar
 Expected outputs:
 
 ```text
-Output\DeskBox_Setup_1.4.8_x64.exe
-Output\DeskBox_Setup_1.4.8_arm64.exe
+Output\DeskBox_Setup_1.5.6_x64.exe
+Output\DeskBox_Setup_1.5.6_arm64.exe
 ```
 
 ## Project layout
@@ -309,6 +281,7 @@ You can also visit [deskbox.fun](https://deskbox.fun) or use the contact informa
 - License: [GPL-3.0-only](LICENSE)
 
 Earlier DeskBox versions already published under the MIT License remain available under that license. The change is not retroactive.
+
 
 ## Star history
 

@@ -1,4 +1,4 @@
-namespace DeskBox.Tests;
+﻿namespace DeskBox.Tests;
 
 public sealed class AotStage5B4C1B2AContractTests
 {
@@ -132,7 +132,7 @@ public sealed class AotStage5B4C1B2AContractTests
         Assert.Contains("case \"VerifyRestore\"", scenario, StringComparison.Ordinal);
         Assert.Contains("case \"Postflight\"", scenario, StringComparison.Ordinal);
         Assert.Contains("case \"Compensate\"", scenario, StringComparison.Ordinal);
-        Assert.Contains("RecentOrganizationHistory.Clear()", scenario, StringComparison.Ordinal);
+        Assert.Contains("OrganizationHistory.Entries.Clear()", scenario, StringComparison.Ordinal);
         Assert.Contains("SHA256.HashData(stream)", scenario, StringComparison.Ordinal);
     }
 
@@ -207,10 +207,10 @@ public sealed class AotStage5B4C1B2AContractTests
         string roadmap = ReadRepositoryFile(
             "docs/architecture/rust-native-aot-roadmap.md");
 
-        Assert.Contains("$auditProfileVersion = 63", audit, StringComparison.Ordinal);
+        Assert.Contains("$auditProfileVersion = 64", audit, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4C1B2A", audit, StringComparison.Ordinal);
-        Assert.Contains("$RequiredAuditProfileVersion = 63", launcher, StringComparison.Ordinal);
+        Assert.Contains("$RequiredAuditProfileVersion = 64", launcher, StringComparison.Ordinal);
         Assert.Contains("$RequiredSummarySchemaVersion = 55", launcher, StringComparison.Ordinal);
         Assert.Contains("$RequiredRustCapabilities = 1023", launcher, StringComparison.Ordinal);
         Assert.Contains("$RequiredRustExportCount = 11", launcher, StringComparison.Ordinal);

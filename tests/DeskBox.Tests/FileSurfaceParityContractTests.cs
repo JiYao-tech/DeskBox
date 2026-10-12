@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 namespace DeskBox.Tests;
@@ -238,7 +238,16 @@ public sealed class FileSurfaceParityContractTests
             fileService,
             StringComparison.Ordinal);
         Assert.Contains("IFileOperationNative", shellTransfer, StringComparison.Ordinal);
-        Assert.Contains("thread.SetApartmentState(ApartmentState.STA)", shellTransfer, StringComparison.Ordinal);
+        // The dedicated STA dispatch moved into the bounded runner (feedback
+        // 455): the transfer still owns an STA worker thread, now with a
+        // watchdog that abandons a wedged one instead of hanging the import.
+        Assert.Contains("s_shellTransferRunner", shellTransfer, StringComparison.Ordinal);
+        Assert.Contains(
+            "thread.SetApartmentState(ApartmentState.STA)",
+            File.ReadAllText(Path.Combine(
+                root,
+                "src/DeskBox/Helpers/BoundedStaOperationRunner.cs")),
+            StringComparison.Ordinal);
         Assert.Contains("fileOperation.SetOwnerWindow(ownerWindowHandle)", shellTransfer, StringComparison.Ordinal);
         Assert.Contains("useShellProgress: true", surface, StringComparison.Ordinal);
         Assert.Contains("useShellProgress: true", itemVisuals, StringComparison.Ordinal);
@@ -277,31 +286,40 @@ public sealed class FileSurfaceParityContractTests
     }
 
     [Fact]
-    public void NativeAotInteractiveCrossVolumeMoves_BypassLegacyShellMove()
+    public void NativeAotInteractiveRouting_ShellOwnsCrossVolumeMovesAndCopies()
     {
         string source = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
             "src/DeskBox/Services/FileService.cs"));
         int aotBranch = source.IndexOf(
-            "// The staged Native AOT profile",
+            "// The Native AOT profile keeps the legacy SHFileOperation bridge",
             StringComparison.Ordinal);
-        int volumeGuard = source.IndexOf(
+        Assert.True(aotBranch >= 0, "The Native AOT interactive branch was removed.");
+        int branchEnd = source.IndexOf("#endif", aotBranch, StringComparison.Ordinal);
+        Assert.True(branchEnd > aotBranch);
+        string branch = source[aotBranch..branchEnd];
+        int volumeGuard = branch.IndexOf(
             "CanUseLegacyShellMove(",
-            aotBranch,
             StringComparison.Ordinal);
-        int shellMove = source.IndexOf(
+        int shellMove = branch.IndexOf(
             "ExecuteShellMovePlanAsync(",
-            volumeGuard,
             StringComparison.Ordinal);
-        int fallbackLog = source.IndexOf(
-            "Legacy Shell move bypassed because one or",
-            shellMove,
+        int modernEngine = branch.IndexOf(
+            "ExecuteModernShellTransferPlanAsync(",
             StringComparison.Ordinal);
 
-        Assert.True(aotBranch >= 0);
-        Assert.True(volumeGuard > aotBranch);
-        Assert.True(shellMove > volumeGuard);
-        Assert.True(fallbackLog > shellMove);
+        Assert.True(
+            volumeGuard >= 0 && shellMove > volumeGuard && modernEngine > shellMove,
+            "Same-volume moves must keep the legacy bridge; everything else " +
+            "must reach the modern Shell engine after it.");
+        // Cross-volume moves and copies must not fall back to the managed
+        // engine inside the interactive AOT branch: its CreateFileW(DELETE)
+        // source probe fails raw with access denied on readable-but-not-
+        // deletable sources such as Public Desktop shortcuts (feedback #138).
+        Assert.DoesNotContain(
+            "ExecuteManagedTransferPlanWithProgressAsync",
+            branch,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -944,9 +962,17 @@ public sealed class FileSurfaceParityContractTests
             "class StackPopoverInlineRenameWindow : Window",
             stackPopoverRenameWindow,
             StringComparison.Ordinal);
+        // The borderless presenter is applied through the shared degrading
+        // helper: early-logon sessions reject these windowing calls outright.
+        Assert.Contains(
+            "WindowShellState.TryApplyBorderlessOverlappedPresenter(_appWindow);",
+            stackPopoverRenameWindow,
+            StringComparison.Ordinal);
         Assert.Contains(
             "presenter.SetBorderAndTitleBar(false, false)",
-            stackPopoverRenameWindow,
+            File.ReadAllText(Path.Combine(
+                root,
+                "src/DeskBox/Helpers/WindowShellState.cs")),
             StringComparison.Ordinal);
         Assert.Contains(
             "extendedStyle &= ~Win32Helper.WS_EX_NOACTIVATE",
@@ -972,8 +998,14 @@ public sealed class FileSurfaceParityContractTests
             stackPopoverRenameWindow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "IsShownInSwitchers = false",
+            "WindowShellState.TryHideFromSwitchers(_appWindow);",
             stackPopoverRenameWindow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "appWindow.IsShownInSwitchers = false;",
+            File.ReadAllText(Path.Combine(
+                root,
+                "src/DeskBox/Helpers/WindowShellState.cs")),
             StringComparison.Ordinal);
         Assert.DoesNotContain(
             "new ContentDialog",
@@ -1177,9 +1209,12 @@ public sealed class FileSurfaceParityContractTests
             "SearchEngineService",
             stackPopover,
             StringComparison.Ordinal);
+        string adapter = File.ReadAllText(Path.Combine(
+            root,
+            "src/DeskBox/Controls/WidgetContents/FileWidgetContentAdapter.cs"));
         Assert.Contains(
             "public void PrepareForReuse()",
-            source,
+            adapter,
             StringComparison.Ordinal);
         Assert.Contains(
             "ViewModel.PrepareStackDisplayForReuse()",
@@ -1326,7 +1361,7 @@ public sealed class FileSurfaceParityContractTests
     }
 
     [Fact]
-    public void ManagedShortcutDrag_PrefersMoveButAllowsSafeInternalLink()
+    public void FileDrag_UsesStartDragAsyncWithUnpreferredCopyMove()
     {
         string root = FindRepositoryRoot();
         XDocument document = XDocument.Load(Path.Combine(
@@ -1335,25 +1370,68 @@ public sealed class FileSurfaceParityContractTests
         string source = File.ReadAllText(Path.Combine(
             root,
             "src/DeskBox/Controls/WidgetContents/FileSurfaceContent.xaml.cs"));
+        string packageSource = File.ReadAllText(Path.Combine(
+            root,
+            "src/DeskBox/Controls/FileItemDragPackage.cs"));
 
+        // ListViewBase.CanDragItems is intentionally off: it never publishes
+        // AllowedOperations, so the external mask and the preferred operation
+        // stay glued to RequestedOperation — the coupling that made Windows 10
+        // Explorer ask which operation to run. Container-level CanDrag starts
+        // StartDragAsync, which carries both settings separately.
         XElement[] itemViews = document
             .Descendants()
             .Where(element =>
                 element.Name.LocalName is "GridView" or "ListView" &&
-                (string?)element.Attribute("CanDragItems") == "True")
+                (string?)element.Attribute("ContainerContentChanging") ==
+                    "ItemsView_ContainerContentChanging")
             .ToArray();
-
         Assert.Equal(2, itemViews.Length);
-        Assert.All(itemViews, view => Assert.Equal(
-            "Items_DragStarting",
-            (string?)view.Attribute("DragStarting")));
+        Assert.All(itemViews, view =>
+        {
+            Assert.Null(view.Attribute("CanDragItems"));
+            // DragStarting/DropCompleted are not routed events in WinUI 3:
+            // they must be wired per item container, not on the view.
+            Assert.Null(view.Attribute("DragStarting"));
+            Assert.Null(view.Attribute("DropCompleted"));
+        });
+
+        XNamespace xamlNs = "http://schemas.microsoft.com/winfx/2006/xaml";
+        foreach (string styleKey in
+                 new[] { "SurfaceGridViewItemStyle", "SurfaceListViewItemStyle" })
+        {
+            XElement style = document
+                .Descendants()
+                .Single(element =>
+                    element.Name.LocalName == "Style" &&
+                    (string?)element.Attribute(xamlNs + "Key") == styleKey);
+            Assert.Contains(
+                style.Elements().Where(element =>
+                    element.Name.LocalName == "Setter"),
+                setter =>
+                    (string?)setter.Attribute("Property") == "CanDrag" &&
+                    (string?)setter.Attribute("Value") == "True");
+        }
+
         Assert.Contains(
-            "FileItemDragPackage.SupportedOperations",
+            "args.ItemContainer.DragStarting += Items_DragStarting;",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "FileItemDragPackage.ResolveSupportedOperations(",
+            "args.ItemContainer.DropCompleted += Items_DropCompleted;",
             source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "e.AllowedOperations = FileItemDragPackage.ResolveDragOutAllowedOperations(",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "DataPackageOperation.Copy | DataPackageOperation.Move",
+            packageSource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "RequestedOperation = DataPackageOperation.None",
+            packageSource,
             StringComparison.Ordinal);
         Assert.Contains(
             "DeskBoxDragData.DragSessionIdProperty",
@@ -1363,15 +1441,6 @@ public sealed class FileSurfaceParityContractTests
             "CanReuseDragPayloadSnapshot(",
             source,
             StringComparison.Ordinal);
-        int allowedOperationsIndex = source.IndexOf(
-            "e.AllowedOperations = FileItemDragPackage.SupportedOperations;",
-            StringComparison.Ordinal);
-        Assert.True(allowedOperationsIndex >= 0);
-        int sourcePathGuardIndex = source.IndexOf(
-            "if (sourcePaths.Length > 0)",
-            allowedOperationsIndex,
-            StringComparison.Ordinal);
-        Assert.True(sourcePathGuardIndex > allowedOperationsIndex);
         Assert.DoesNotContain(
             "CompleteVirtualShortcutDesktopMoveAsync",
             source,
@@ -1380,16 +1449,24 @@ public sealed class FileSurfaceParityContractTests
             "MoveRejectedManagedDragToDesktopAsync",
             source,
             StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ExplorerDropTargetResolver",
+            source,
+            StringComparison.Ordinal);
         Assert.Contains(
             "ObserveExternalDragOutAsync",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "ShouldObserveExternalDragOut(",
+            "ResolveExternalDragObservation(",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "return !fromStackPopover &&",
+            "ExternalDragObservation.Brief",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "SuppressDraggedArrivals",
             source,
             StringComparison.Ordinal);
     }
@@ -1877,6 +1954,145 @@ public sealed class FileSurfaceParityContractTests
             StringComparison.Ordinal);
         Assert.DoesNotContain("ContentDropHighlight", shell, StringComparison.Ordinal);
         Assert.DoesNotContain("ContentDropHighlight", shellXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShortcutTiles_LaunchForInternalDragsToo()
+    {
+        // Dragging a tile onto an application-shortcut tile inside the same
+        // widget must open the file with the linked application, exactly like
+        // an Explorer drag does. WinUI does not deliver the routed Drop for a
+        // drag that started from the same ListView, so the release is resolved
+        // from DropCompleted through the shared policy - and the accepted
+        // link result is what makes the source keep its files.
+        string root = FindRepositoryRoot();
+        string visuals = File.ReadAllText(Path.Combine(
+            root,
+            "src/DeskBox/Controls/WidgetContents/FileSurfaceContent.ItemVisuals.cs"));
+        string surface = File.ReadAllText(Path.Combine(
+            root,
+            "src/DeskBox/Controls/WidgetContents/FileSurfaceContent.xaml.cs"));
+        string dragOver = ReadPrivateMethod(
+            visuals,
+            "private void TryHandleLaunchTargetDragOver(");
+        string drop = ReadPrivateMethod(
+            visuals,
+            "private async Task TryHandleLaunchTargetDropAsync(");
+        string launchOnCompletion = ReadPrivateMethod(
+            visuals,
+            "private bool TryLaunchInternalDragOnShortcut(");
+        string completed = ReadPrivateMethod(
+            surface,
+            "private void CompleteDragItemsSession(");
+
+        Assert.Contains(
+            "ShortcutLaunchPolicy.EvaluateInternalDrag(",
+            dragOver,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ShortcutLaunchPolicy.EvaluateInternalDrag(",
+            drop,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "PersistSurfaceReorder();",
+            dragOver,
+            StringComparison.Ordinal);
+        // A DeskBox-sourced drag arms the launch only over the tile's icon:
+        // the label and padding keep reorder/import semantics, in both the
+        // DragOver handler and the routed Drop that cross-view drags receive.
+        Assert.Contains(
+            "IsPointerOverLaunchIcon(",
+            dragOver,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "IsPointerOverLaunchIcon(",
+            drop,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "_internalLaunchHoverBorder = launchBorder;",
+            dragOver,
+            StringComparison.Ordinal);
+        // Leaving the icon after arming must disarm: the root feedback path
+        // only clears the folder and stack targets, nothing else.
+        Assert.Contains(
+            "DisarmLaunchHover(",
+            dragOver,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "DisarmLaunchHover(",
+            drop,
+            StringComparison.Ordinal);
+        // The completion resolves the release from the live icon geometry
+        // instead of a point recorded during DragOver.
+        Assert.Contains(
+            "IsCursorInsideLaunchIcon()",
+            visuals,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Widget.DropOnShortcutOpenWith",
+            dragOver,
+            StringComparison.Ordinal);
+        // The launch hover must read like a plain tile hover (neutral surface,
+        // no accent border), so it uses its own target rather than the folder
+        // drop target's accent visual.
+        Assert.Contains(
+            "SetLaunchDropTarget(launchBorder);",
+            dragOver,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "SetFolderDropTarget(launchBorder);",
+            dragOver,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "FileItemSurfaceVisualState.Hover",
+            ReadPrivateMethod(
+                visuals,
+                "private void SetLaunchDropTarget("),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ShortcutLaunchPolicy.ShouldLaunchFromCompletedInternalDrag(",
+            visuals,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ShouldLaunchFromCompletedInternalDrag(",
+            completed,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "TryLaunchInternalDragOnShortcut(",
+            completed,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ShortcutFileLauncher.TryLaunchWithFiles(",
+            launchOnCompletion,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "MarkNativeLaunchConsumed();",
+            launchOnCompletion,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "PersistSurfaceReorder();",
+            launchOnCompletion,
+            StringComparison.Ordinal);
+        // A consumed launch never raises the tile's DragLeave, so both
+        // completion paths must clear the launch hover themselves.
+        Assert.Contains(
+            "ClearLaunchDropTarget();",
+            launchOnCompletion,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ClearLaunchDropTarget();",
+            drop,
+            StringComparison.Ordinal);
+        // A successful launch is silent: the application window is its own
+        // feedback. Only refusals and failures report.
+        Assert.DoesNotContain(
+            "ShowShortcutLaunchFeedback(",
+            visuals + surface,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ShowShortcutLaunchRefusedFeedback(",
+            launchOnCompletion,
+            StringComparison.Ordinal);
     }
 
     private static string ReadPrivateMethod(string source, string marker)

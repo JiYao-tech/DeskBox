@@ -14,10 +14,14 @@ public sealed class WidgetCompactTrayVisibilityContractTests
 
         Assert.Contains("UsesSmartCollapseBehavior()", method, StringComparison.Ordinal);
         Assert.Contains("_isSmartPinnedOpen", method, StringComparison.Ordinal);
-        Assert.Contains(
-            "EnsureCompactPlacementFromExpandedBounds(persist: true);",
+        // Feedback 340: tray hide runs over freshly restored geometry and must
+        // never fabricate a persisted capsule placement from the expanded
+        // window corner — the collapse below derives bounds transiently.
+        Assert.DoesNotContain(
+            "EnsureCompactPlacementFromExpandedBounds",
             method,
             StringComparison.Ordinal);
+        Assert.DoesNotContain("CaptureCompactPlacement", method, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "Config.CompactPlacement = null;",
             method,
@@ -31,7 +35,6 @@ public sealed class WidgetCompactTrayVisibilityContractTests
 
     [Theory]
     [InlineData("src/DeskBox/Views/ContentWidgetWindow.xaml.cs")]
-    [InlineData("src/DeskBox/Views/QuickCaptureWidgetWindow.xaml.cs")]
     public void TrayHide_PreparesCapsuleBeforeCapturingAnimationPositionAndStopsHoverRecovery(
         string relativePath)
     {
@@ -58,10 +61,6 @@ public sealed class WidgetCompactTrayVisibilityContractTests
         "src/DeskBox/Views/ContentWidgetWindow.Commands.cs",
         "private void ContentWidgetShell_RightTapped",
         "private void ContentWidgetShell_TitleDoubleTapped")]
-    [InlineData(
-        "src/DeskBox/Views/QuickCaptureWidgetWindow.Menus.cs",
-        "private void QuickCaptureShell_RightTapped",
-        "private MenuFlyout CreateMoreFlyout")]
     public void TrayHide_SuppressesNativeAndRoutedPointerInputUntilHwndIsHidden(
         string relativePath,
         string rightTappedMarker,
@@ -163,6 +162,56 @@ public sealed class WidgetCompactTrayVisibilityContractTests
         Assert.True(recoveryIndex >= 0 && recoveryIndex < synchronizeIndex);
     }
 
+    /// <summary>
+    /// A hidden widget can never satisfy the warm-up gate, and no in-loop
+    /// delay changes that — only a native show can. The deferred run must
+    /// stop instead of polling until the next lifecycle event (perf-log
+    /// flood, 2026-10-03: hidden widgets logged CompactExpansionWarmupDeferred
+    /// every ~320 ms and rotated the log within an hour).
+    /// </summary>
+    [Fact]
+    public void WarmupRetry_StopsWhileHiddenAndReliesOnShowPathToRearm()
+    {
+        string source = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Views/WidgetWindowBase.Collapse.cs"));
+        string warmupRun = ExtractSection(
+            source,
+            "private async Task RunCompactExpansionWarmupAsync(",
+            "private static async Task<bool> WaitForCompactExpansionWarmupGateAsync(");
+        string visibility = ExtractSection(
+            source,
+            "protected void NotifyCompactHostVisibilityChanged(bool isVisible)",
+            "private void StartCompactHoverRecoveryProbe()");
+
+        int stopIndex = warmupRun.IndexOf(
+            "action=stop-until-shown",
+            StringComparison.Ordinal);
+        int retryIndex = warmupRun.IndexOf(
+            "action=retry",
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "WidgetCompactWarmupPolicy.ShouldKeepWaiting(warmupSnapshot)",
+            warmupRun,
+            StringComparison.Ordinal);
+        Assert.True(stopIndex >= 0 && stopIndex < retryIndex);
+
+        // Deferral logging is deduplicated so a long-lived transient block
+        // (cursor parked on the capsule) cannot flood the log either.
+        Assert.Contains("lastDeferral", warmupRun, StringComparison.Ordinal);
+
+        // The re-arm contract the stop relies on: hiding cancels the run,
+        // and every show path funnels through this method, which queues an
+        // urgent warm-up for the now-visible window.
+        int hideCancelIndex = visibility.IndexOf(
+            "CancelCompactExpansionWarmup();",
+            StringComparison.Ordinal);
+        int showRearmIndex = visibility.IndexOf(
+            "QueueCompactExpansionWarmup(urgent: true);",
+            StringComparison.Ordinal);
+        Assert.True(hideCancelIndex >= 0);
+        Assert.True(showRearmIndex > hideCancelIndex);
+    }
+
     [Fact]
     public void StaleRoutedDragSession_DoesNotPermanentlyBlockHoverExpansion()
     {
@@ -215,7 +264,7 @@ public sealed class WidgetCompactTrayVisibilityContractTests
     }
 
     [Fact]
-    public void EnteringCompactBehavior_CapturesOnlyAnInitialPlacementBeforeStateTransition()
+    public void EnteringCompactBehavior_DerivesCapsuleBoundsBeforeStateTransition()
     {
         string source = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Views/WidgetWindowBase.Collapse.cs"));
@@ -224,11 +273,19 @@ public sealed class WidgetCompactTrayVisibilityContractTests
             "private void ApplyEffectiveCollapseBehavior(bool animate)",
             "private void SynchronizeCompactPointerStateForSmartEntry()");
 
+        // Feedback 340: the derivation is transient for widgets that have
+        // never been collapsed; only the deliberate re-commit of an existing
+        // placement captures. Either way the bounds are derived before the
+        // state transition so the collapse lands on the window's region.
         int captureIndex = method.IndexOf(
-            "EnsureCompactPlacementFromExpandedBounds(persist: true);",
+            "DeriveCompactPlacementFromExpandedBounds(",
             StringComparison.Ordinal);
         int transitionIndex = method.IndexOf("SetCollapsedState(", StringComparison.Ordinal);
         Assert.True(captureIndex >= 0 && captureIndex < transitionIndex);
+        Assert.Contains(
+            "capturePlacement: Config.CompactPlacement is not null",
+            method,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -243,7 +300,7 @@ public sealed class WidgetCompactTrayVisibilityContractTests
 
         Assert.DoesNotContain("CompactPlacementNeedsDirectionRepair()", method, StringComparison.Ordinal);
         Assert.DoesNotContain("RefreshCompactPlacementFromExpandedBounds", method, StringComparison.Ordinal);
-        Assert.Contains("EnsureCompactPlacementFromExpandedBounds(persist: true);", method, StringComparison.Ordinal);
+        Assert.Contains("EnsureCompactPlacementFromExpandedBounds();", method, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -272,15 +329,24 @@ public sealed class WidgetCompactTrayVisibilityContractTests
             StringComparison.Ordinal);
 
         Assert.True(directionChangedIndex >= 0);
-        Assert.Contains("CancelPendingCompactExpansion();", method, StringComparison.Ordinal);
-        Assert.Contains("InvalidateCompactExpansionReadiness();", method, StringComparison.Ordinal);
+        Assert.Contains(
+            "ApplyCompactExpansionDirectionChange();",
+            method,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("Config.CompactPlacement = null;", method, StringComparison.Ordinal);
         Assert.True(directionOnlyGuardIndex > directionChangedIndex);
         Assert.True(returnIndex > directionOnlyGuardIndex && returnIndex < behaviorApplyIndex);
+
+        string directionChange = ExtractSection(
+            source,
+            "private void ApplyCompactExpansionDirectionChange()",
+            "private void EnsureCompactPlacementFromExpandedBounds(");
+        Assert.Contains("CancelPendingCompactExpansion();", directionChange, StringComparison.Ordinal);
+        Assert.Contains("InvalidateCompactExpansionReadiness();", directionChange, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void FixedDirectionExpansion_StopsBeforeChangingCapsuleStateWhenFullSizeDoesNotFit()
+    public void ExpansionReadiness_NeverBlocksResolvedExpansionRequests()
     {
         string source = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Views/WidgetWindowBase.Collapse.cs"));
@@ -289,25 +355,57 @@ public sealed class WidgetCompactTrayVisibilityContractTests
             "private void SetCollapsedState(",
             "private RectInt32 ResolvePersistedExpandedHostBounds()");
 
-        int strictResolveIndex = method.IndexOf(
-            "ResolveCompactExpansionLayout(compact, requireFullSize: true)",
+        int adaptiveResolveIndex = method.IndexOf(
+            "ResolveRequestedCompactExpansion(compact)",
             StringComparison.Ordinal);
         int currentPlacementCaptureIndex = method.IndexOf(
             "CaptureCompactPlacement(GetCurrentWindowBounds(), persist: false);",
             StringComparison.Ordinal);
-        int blockedIndex = method.IndexOf(
-            "if (!readinessLayout.CanExpand)",
-            strictResolveIndex,
-            StringComparison.Ordinal);
-        int blockedReturnIndex = method.IndexOf("return;", blockedIndex, StringComparison.Ordinal);
         int targetChangeIndex = method.IndexOf(
             "_targetCollapsed = collapsed;",
             StringComparison.Ordinal);
 
-        Assert.True(currentPlacementCaptureIndex >= 0 && currentPlacementCaptureIndex < strictResolveIndex);
-        Assert.True(strictResolveIndex >= 0 && strictResolveIndex < blockedIndex);
-        Assert.Contains("LogCompactExpansionBlocked", method, StringComparison.Ordinal);
-        Assert.True(blockedReturnIndex > blockedIndex && blockedReturnIndex < targetChangeIndex);
+        // Adaptive resolution keeps fixed directions fixed and shrinks the
+        // expanded size to the space actually available instead of blocking,
+        // so a resolved expansion request always proceeds: no CanExpand=false
+        // gate may return before the capsule state flips.
+        Assert.True(currentPlacementCaptureIndex >= 0 && currentPlacementCaptureIndex < adaptiveResolveIndex);
+        Assert.True(adaptiveResolveIndex >= 0 && adaptiveResolveIndex < targetChangeIndex);
+        Assert.DoesNotContain("!readinessLayout.CanExpand", method, StringComparison.Ordinal);
+        Assert.DoesNotContain("LogCompactExpansionBlocked(compact, readinessLayout", method, StringComparison.Ordinal);
+
+        // Collapsing still resolves a strict full-size layout to pick the
+        // transition anchor; only that degenerate path may keep its verbose
+        // blocked diagnostic.
+        Assert.Contains("LogCompactExpansionBlocked(to, layout)", method, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RequestedCompactExpansion_AlwaysExpandsAndNeverShowsBlockedFeedback()
+    {
+        string source = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Views/WidgetWindowBase.Collapse.cs"));
+        string resolver = ExtractSection(
+            source,
+            "private WidgetCompactExpansionLayout ResolveRequestedCompactExpansion(",
+            "private void LogCompactExpansionBlocked(");
+
+        // The strict pass requires the full requested size; the fallback pass
+        // drops requireFullSize, which makes the calculator's canExpand
+        // clause unconditionally true. The result therefore can never report
+        // a blocked expansion, and the retired "not enough room" feedback
+        // bubble must not resurface.
+        Assert.Contains("requireFullSize: true", resolver, StringComparison.Ordinal);
+        Assert.Contains(
+            ": ResolveCompactExpansionLayout(compactBounds);",
+            resolver,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("showFeedback", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Widget.Compact.ExpansionSpaceInsufficient",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("compact-expansion-space", source, StringComparison.Ordinal);
     }
 
     private static string ExtractSection(string source, string startMarker, string endMarker)

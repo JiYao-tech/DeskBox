@@ -404,7 +404,7 @@ public sealed class DesktopOrganizationTests : IDisposable
         Assert.All(progressValues, value => Assert.Equal(2, value.TotalCount));
         Assert.All(progressValues, value => Assert.False(string.IsNullOrWhiteSpace(value.TargetDisplayName)));
 
-        var organizer = new OrganizerService(settings, fileService, () => desktop);
+        var organizer = TestOrganizerServices.Create(settings, fileService, () => desktop);
         await organizer.UndoAsync(result.History.Id);
 
         Assert.True(File.Exists(sourceOne));
@@ -553,7 +553,7 @@ public sealed class DesktopOrganizationTests : IDisposable
         Assert.False(Directory.Exists(sourceFolder));
         Assert.True(File.Exists(Path.Combine(destinationFolder, "readme.txt")));
 
-        await new OrganizerService(settings, fileService, () => desktop)
+        await TestOrganizerServices.Create(settings, fileService, () => desktop)
             .UndoAsync(result.History.Id);
 
         Assert.True(File.Exists(Path.Combine(sourceFolder, "readme.txt")));
@@ -605,8 +605,13 @@ public sealed class DesktopOrganizationTests : IDisposable
     }
 
     [Fact]
-    public async Task Settings_DisablesAutomaticOrganizationWhenLastEffectiveRuleIsRemoved()
+    public async Task Settings_KeepsAutoOrganizationWhenUserDisablesLastRule()
     {
+        // Only a truly deleted target (a widget that entered DeletedWidgetIds)
+        // may close the master switch programmatically. A user disabling the
+        // last rule is not a deletion: the switch and baseline stay as they
+        // are, and re-enabling the rule resumes organization (feedback
+        // 323/370/405 contract).
         string mappedFolder = Directory.CreateDirectory(
             Path.Combine(_root, "auto-target")).FullName;
         var settings = new SettingsService(Path.Combine(_root, "auto-settings"));
@@ -619,12 +624,184 @@ public sealed class DesktopOrganizationTests : IDisposable
             IsEnabled = false
         });
         settings.Settings.DesktopAutoOrganizationEnabled = true;
-        settings.Settings.DesktopAutoOrganizationBaselineUtc = DateTimeOffset.UtcNow;
+        DateTimeOffset baseline = DateTimeOffset.UtcNow;
+        settings.Settings.DesktopAutoOrganizationBaselineUtc = baseline;
 
         await settings.SaveAsync();
 
+        Assert.True(settings.Settings.DesktopAutoOrganizationEnabled);
+        Assert.Equal(baseline, settings.Settings.DesktopAutoOrganizationBaselineUtc);
+    }
+
+    [Fact]
+    public async Task Settings_KeepsAutoOrganizationWhenMappedPathIsNotBackfilledYet()
+    {
+        // Boot race: load-time normalize runs before WidgetViewModel backfills
+        // MappedFolderPath. The rule must be treated as pending there - the
+        // switch stays on, the rule stays enabled, the baseline is kept, and
+        // nothing is disabled on disk (feedback 323/370/405).
+        string settingsDir = Path.Combine(_root, "pending-settings");
+        var settings = new SettingsService(settingsDir);
+        WidgetConfig widget = new()
+        {
+            Id = "pending-widget",
+            Name = "Documents",
+            WidgetKind = WidgetKind.File,
+            MappedFolderPath = "",
+            FollowsDefaultStoragePath = false
+        };
+        settings.Settings.Widgets.Add(widget);
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        settings.Settings.DesktopAutoOrganizationEnabled = true;
+        DateTimeOffset baseline = DateTimeOffset.UtcNow;
+        settings.Settings.DesktopAutoOrganizationBaselineUtc = baseline;
+
+        await settings.SaveAsync();
+
+        Assert.True(settings.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(
+            settings.Settings.DesktopOrganizationRules.Single(rule =>
+                rule.TargetWidgetId == widget.Id).IsEnabled,
+            "a not-yet-backfilled mapped path must suspend the rule, not disable it");
+        Assert.Equal(baseline, settings.Settings.DesktopAutoOrganizationBaselineUtc);
+
+        var reloaded = new SettingsService(settingsDir);
+        await reloaded.LoadAsync();
+        Assert.True(reloaded.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(
+            reloaded.Settings.DesktopOrganizationRules.Single(rule =>
+                rule.TargetWidgetId == widget.Id).IsEnabled);
+        Assert.NotNull(reloaded.Settings.DesktopAutoOrganizationBaselineUtc);
+    }
+
+    [Fact]
+    public async Task Settings_BackfillsDefaultPathWidgetAndKeepsItsRulePending()
+    {
+        // A default-storage widget's path backfill happens later in the same
+        // normalize pass than the rule validity check: at decision time the
+        // path is still empty, so the rule must survive the same pass as
+        // pending.
+        var settings = new SettingsService(Path.Combine(_root, "backfill-settings"));
+        WidgetConfig widget = new()
+        {
+            Id = "backfill-widget",
+            Name = "Documents",
+            WidgetKind = WidgetKind.File,
+            MappedFolderPath = "",
+            FollowsDefaultStoragePath = true,
+            ManagedFolderName = "Documents"
+        };
+        settings.Settings.Widgets.Add(widget);
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        settings.Settings.DesktopAutoOrganizationEnabled = true;
+
+        await settings.SaveAsync();
+
+        Assert.NotEmpty(settings.Settings.Widgets[0].MappedFolderPath);
+        Assert.True(settings.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(settings.Settings.DesktopOrganizationRules[0].IsEnabled);
+    }
+
+    [Fact]
+    public async Task Settings_ClosesAutoOrganizationAndKeepsBaselineWhenLastTargetIsDeleted()
+    {
+        // A truly deleted target (widget in DeletedWidgetIds) remains the only
+        // path that may close the master switch automatically, but the
+        // baseline is preserved: the watcher reconciles with
+        // BaselineUtc ?? now, and clearing it would widen the organization
+        // window after the feature is turned back on (feedback 323/370/405
+        // contract).
+        string mappedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "deleted-target")).FullName;
+        string settingsDir = Path.Combine(_root, "deleted-settings");
+        var settings = new SettingsService(settingsDir);
+        WidgetConfig widget = CreateWidget("Documents", mappedFolder);
+        settings.Settings.Widgets.Add(widget);
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        settings.Settings.DesktopAutoOrganizationEnabled = true;
+        DateTimeOffset baseline = DateTimeOffset.UtcNow;
+        settings.Settings.DesktopAutoOrganizationBaselineUtc = baseline;
+
+        settings.RemoveWidget(widget.Id);
+        await settings.SaveAsync();
+
         Assert.False(settings.Settings.DesktopAutoOrganizationEnabled);
-        Assert.Null(settings.Settings.DesktopAutoOrganizationBaselineUtc);
+        Assert.Equal(baseline, settings.Settings.DesktopAutoOrganizationBaselineUtc);
+        var reloaded = new SettingsService(settingsDir);
+        await reloaded.LoadAsync();
+        Assert.False(reloaded.Settings.DesktopAutoOrganizationEnabled);
+        Assert.Equal(baseline, reloaded.Settings.DesktopAutoOrganizationBaselineUtc);
+        Assert.False(reloaded.Settings.DesktopOrganizationRules[0].IsEnabled);
+    }
+
+    [Fact]
+    public async Task Settings_DisablesOnlyTheDeletedTargetsRuleAndKeepsSwitchAlive()
+    {
+        string survivorFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "survivor-target")).FullName;
+        string removedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "removed-target")).FullName;
+        var settings = new SettingsService(Path.Combine(_root, "partial-settings"));
+        WidgetConfig survivor = CreateWidget("Images", survivorFolder);
+        WidgetConfig removed = CreateWidget("Documents", removedFolder);
+        settings.Settings.Widgets.Add(survivor);
+        settings.Settings.Widgets.Add(removed);
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = survivor.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Images]
+        });
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = removed.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        settings.Settings.DesktopAutoOrganizationEnabled = true;
+
+        settings.RemoveWidget(removed.Id);
+        await settings.SaveAsync();
+
+        Assert.True(settings.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(settings.Settings.DesktopOrganizationRules.Single(rule =>
+            rule.TargetWidgetId == survivor.Id).IsEnabled);
+        Assert.False(settings.Settings.DesktopOrganizationRules.Single(rule =>
+            rule.TargetWidgetId == removed.Id).IsEnabled);
+    }
+
+    [Fact]
+    public async Task Settings_KeepsRulePendingWhenTargetWidgetIsDisabled()
+    {
+        // A disabled widget is a recoverable state: re-enabling the widget
+        // resumes organization, so its rule must not be killed.
+        string mappedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "disabled-target")).FullName;
+        var settings = new SettingsService(Path.Combine(_root, "disabled-settings"));
+        WidgetConfig widget = CreateWidget("Documents", mappedFolder);
+        widget.IsDisabled = true;
+        settings.Settings.Widgets.Add(widget);
+        settings.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        settings.Settings.DesktopAutoOrganizationEnabled = true;
+
+        await settings.SaveAsync();
+
+        Assert.True(settings.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(settings.Settings.DesktopOrganizationRules[0].IsEnabled);
     }
 
     [Fact]
@@ -644,27 +821,28 @@ public sealed class DesktopOrganizationTests : IDisposable
             TargetWidgetId = "temporary",
             CategoryIds = [DesktopOrganizationCategoryIds.Documents]
         });
-        settings.Settings.RecentOrganizationHistory.Add(new OrganizationHistoryEntry
+        settings.OrganizationHistory.Entries.Add(new OrganizationHistoryEntry
         {
             Id = "transaction",
             ActionType = OrganizationActionType.DesktopOrganization
         });
         var store = new DesktopOrganizationRecoveryStore(
             Path.Combine(_root, "pending-recovery.json"));
+        var item = new DesktopOrganizationRecoveryItem
+        {
+            SourcePath = sourcePath,
+            DestinationPath = destinationPath,
+            TargetWidgetId = "temporary",
+            Completed = true
+        };
+        // A real crash after RecordCompleted persists the destination object
+        // identity alongside the receipt.
+        DesktopOrganizationTransaction.RecordDestinationIdentity(item, destinationPath);
         await store.SaveAsync(new DesktopOrganizationRecoveryJournal
         {
             TransactionId = "transaction",
             CreatedWidgetIds = ["temporary"],
-            Items =
-            [
-                new DesktopOrganizationRecoveryItem
-                {
-                    SourcePath = sourcePath,
-                    DestinationPath = destinationPath,
-                    TargetWidgetId = "temporary",
-                    Completed = false
-                }
-            ]
+            Items = [item]
         });
 
         int restored = await new DesktopOrganizationTransaction(
@@ -677,9 +855,126 @@ public sealed class DesktopOrganizationTests : IDisposable
         Assert.False(File.Exists(destinationPath));
         Assert.DoesNotContain(settings.Settings.Widgets, widget => widget.Id == "temporary");
         Assert.DoesNotContain(settings.Settings.DesktopOrganizationRules, rule => rule.TargetWidgetId == "temporary");
-        Assert.DoesNotContain(settings.Settings.RecentOrganizationHistory, entry => entry.Id == "transaction");
+        Assert.DoesNotContain(settings.OrganizationHistory.Entries, entry => entry.Id == "transaction");
         Assert.False(store.HasPendingJournal);
 
+    }
+
+    [Fact]
+    public async Task RecoverPendingAsync_KeepsItemsWithoutRecordedIdentity()
+    {
+        // Items without a destination identity (legacy journals, or the rare
+        // crash between the physical move and the receipt write) have no
+        // automatic restore authority: the file stays at the destination and
+        // the journal keeps the record.
+        string root = Directory.CreateDirectory(Path.Combine(_root, "identity-none")).FullName;
+        string desktopPath = Path.Combine(root, "desktop");
+        string storagePath = Path.Combine(root, "storage");
+        Directory.CreateDirectory(desktopPath);
+        Directory.CreateDirectory(storagePath);
+        string destinationPath = Path.Combine(storagePath, "moved.txt");
+        File.WriteAllText(destinationPath, "already moved");
+        var settings = new SettingsService(Path.Combine(root, "settings"));
+        var store = new DesktopOrganizationRecoveryStore(
+            Path.Combine(root, "pending-recovery.json"));
+        await store.SaveAsync(new DesktopOrganizationRecoveryJournal
+        {
+            TransactionId = "transaction",
+            CreatedWidgetIds = ["temporary"],
+            Items =
+            [
+                new DesktopOrganizationRecoveryItem
+                {
+                    SourcePath = Path.Combine(desktopPath, "moved.txt"),
+                    DestinationPath = destinationPath,
+                    TargetWidgetId = "temporary",
+                    Completed = true,
+                    DestinationIdentity = null
+                }
+            ]
+        });
+
+        int restored = await new DesktopOrganizationTransaction(
+            settings,
+            new FileService(),
+            store).RecoverPendingAsync();
+
+        Assert.Equal(0, restored);
+        Assert.True(
+            File.Exists(destinationPath),
+            "no identity means no automatic move");
+    }
+
+    [Fact]
+    public async Task Undo_PartialFailureRetryMovesOnlyTheRemainingItem()
+    {
+        // A retry after a partial undo must not touch the already-restored
+        // item: its undo target is gone and re-running it would relocate
+        // whatever reappeared at that path.
+        string root = Directory.CreateDirectory(Path.Combine(_root, "undo-retry")).FullName;
+        string desktopPath = Path.Combine(root, "desktop");
+        string widgetPath = Path.Combine(root, "widget");
+        Directory.CreateDirectory(desktopPath);
+        Directory.CreateDirectory(widgetPath);
+        string firstSource = Path.Combine(desktopPath, "first.txt");
+        string secondSource = Path.Combine(desktopPath, "second.txt");
+        File.WriteAllText(firstSource, "first");
+        File.WriteAllText(secondSource, "second");
+        // The widget-side objects must exist before their identities are
+        // captured as undo receipts (a real move records them on arrival).
+        File.WriteAllText(Path.Combine(widgetPath, "first.txt"), "first");
+        File.WriteAllText(Path.Combine(widgetPath, "second.txt"), "second");
+        var settings = new SettingsService(Path.Combine(root, "settings"));
+        var history = new OrganizationHistoryEntry
+        {
+            Id = "undo-retry",
+            ActionType = OrganizationActionType.MoveBackToDesktop,
+            CanUndo = true,
+            Items =
+            [
+                new OrganizationHistoryItem
+                {
+                    Name = "first.txt",
+                    SourcePath = firstSource,
+                    DestinationPath = Path.Combine(widgetPath, "first.txt"),
+                    DestinationIdentity = FileService.CaptureUndoReceiptIdentity(
+                        Path.Combine(widgetPath, "first.txt"))
+                },
+                new OrganizationHistoryItem
+                {
+                    Name = "second.txt",
+                    SourcePath = secondSource,
+                    DestinationPath = Path.Combine(widgetPath, "second.txt"),
+                    DestinationIdentity = FileService.CaptureUndoReceiptIdentity(
+                        Path.Combine(widgetPath, "second.txt"))
+                }
+            ]
+        };
+        settings.OrganizationHistory.Entries.Add(history);
+        await settings.SaveAsync(notifySubscribers: false);
+        // Simulate the state after a partial undo: the first item was already
+        // restored to the desktop (its data still sits at the widget path,
+        // which is exactly the trap — moving it again would duplicate), the
+        // second is still in the widget.
+        File.WriteAllText(firstSource, "first");
+        history.Items[0].IsRestored = true;
+        history.Items[0].RestoredPath = firstSource;
+        await settings.SaveAsync(notifySubscribers: false);
+
+        var service = TestOrganizerServices.Create(
+            settings,
+            new FileService(),
+            () => desktopPath);
+        await service.UndoAsync("undo-retry");
+
+        Assert.True(history.IsUndone);
+        Assert.Equal(
+            "second",
+            await File.ReadAllTextAsync(secondSource));
+        Assert.False(
+            File.Exists(Path.Combine(desktopPath, "first (2).txt")),
+            "the retry must never duplicate the restored item");
+        Assert.Single(Directory.GetFiles(desktopPath, "first*.txt"));
     }
 
     private DesktopOrganizationFileSnapshot Snapshot(

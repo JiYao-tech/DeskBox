@@ -109,6 +109,14 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         RegisterTabPointerHandlers();
         RegisterKeyboardAccelerators();
         ApplyWheelFeedbackAccent();
+        // The wheel feedback and the position rail copy neutral colors at
+        // paint time, so a light/dark flip must re-resolve both.
+        ActualThemeChanged += (_, _) =>
+        {
+            ApplyWheelFeedbackAccent();
+            SetPositionRail(CurrentPositionRailLayer, _displayedIdentity);
+            SetPositionRail(OutgoingPositionRailLayer, null);
+        };
         CurrentTitle.RegisterPropertyChangedCallback(
             TextBlock.FontSizeProperty,
             (_, _) =>
@@ -127,6 +135,8 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
             CancelDetachLongPress();
             CancelTabInteraction();
             CancelAllHoverSwitches();
+            CancelDragHoverSwitch();
+            ExitFileDragStripFreeze();
         };
         Visibility = Visibility.Collapsed;
     }
@@ -414,11 +424,14 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
 
     private void ApplyWheelFeedbackAccent()
     {
-        Color accent = TitleIconAccentColor;
-        UpWheelFeedbackAccentStart.Color = accent;
-        UpWheelFeedbackAccentEnd.Color = accent;
-        DownWheelFeedbackAccentStart.Color = accent;
-        DownWheelFeedbackAccentEnd.Color = accent;
+        // The wheel feedback flashes while the pointer scrolls the title, which
+        // is a transient interaction state, so it uses the neutral tone rather
+        // than the widget's accent.
+        Color tone = NeutralInteractionBrush.Line(this);
+        UpWheelFeedbackAccentStart.Color = tone;
+        UpWheelFeedbackAccentEnd.Color = tone;
+        DownWheelFeedbackAccentStart.Color = tone;
+        DownWheelFeedbackAccentEnd.Color = tone;
     }
 
     private void ApplyNavigationStyle()
@@ -566,12 +579,15 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         foreach (WidgetGroupPositionRailSlot slot in slots)
         {
             bool active = slot.IsActive;
+            // The pager dots are a selected-position indicator, so they draw
+            // the neutral interaction tone rather than the identity accent.
             host.Children.Add(new Border
             {
                 Width = 3,
                 Height = active ? 7 : 3,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Background = CreateAccentBrush(),
+                Background = SharedBrushCache.GetOrCreate(
+                    NeutralInteractionBrush.Line(this)),
                 CornerRadius = new CornerRadius(1.5),
                 IsHitTestVisible = false,
                 Opacity = active ? 0.94 : 0.3
@@ -582,6 +598,14 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
     private async void BeginTabHoverSwitch(string memberId)
     {
         if (_draggingMemberId is not null || IsTabInteractionBusy)
+        {
+            return;
+        }
+
+        // PointerEntered can leak through on some machines while an OLE file
+        // drag is running; during a file drag the dwell switch owns member
+        // switching, so the 80ms hover path must stay out of its way.
+        if (_isFileDragStripFreeze)
         {
             return;
         }
@@ -687,16 +711,6 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         Root.Opacity = 0.72;
         DetachScaleTransform.ScaleX = 0.985;
         DetachScaleTransform.ScaleY = 0.985;
-    }
-
-    private void GroupTitle_PointerPressed(
-        object sender,
-        PointerRoutedEventArgs e)
-    {
-        if (sender is UIElement source)
-        {
-            BeginDetachLongPress(source, e);
-        }
     }
 
     private void GroupTitle_PointerMoved(
@@ -984,19 +998,12 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         DetachScaleTransform.ScaleY = 1;
     }
 
-    private Brush CreateAccentBrush() =>
-        SharedBrushCache.GetOrCreate(TitleIconAccentColor);
-
-    private static Brush ResolveThemeBrush(
+    private Brush ResolveThemeBrush(
         string resourceKey,
         Brush fallback)
     {
-        return Application.Current.Resources.TryGetValue(
-                   resourceKey,
-                   out object? resource) &&
-               resource is Brush brush
-            ? brush
-            : fallback;
+        return NeutralInteractionBrush.ResolveThemedResource(resourceKey, this) ??
+               fallback;
     }
 
     private void UpdateAccessibility(IdentitySnapshot identity)
@@ -1042,14 +1049,16 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
                 member.WidgetId,
                 _displayedIdentity?.WidgetId,
                 StringComparison.Ordinal);
+            // An emoji override renders as a colored text prefix: FontIcon
+            // cannot be trusted to rasterize color emoji on every surface.
+            string memberEmoji = member.CustomTitleIconEmoji;
             var item = new MenuFlyoutItem
             {
-                Text = member.Name,
+                Text = memberEmoji.Length > 0
+                    ? $"{memberEmoji} {member.Name}"
+                    : member.Name,
                 FontWeight = Microsoft.UI.Text.FontWeights.Normal,
-                Icon = new FontIcon
-                {
-                    Glyph = isCurrent ? "\uE73E" : member.Glyph
-                }
+                Icon = CreateMemberMenuIcon(member, isCurrent, memberEmoji.Length > 0)
             };
             int index = FindMemberIndex(
                 _presentation.Members,
@@ -1069,6 +1078,37 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
 
         AddGroupCommands(flyout);
         return flyout;
+    }
+
+    /// <summary>
+    /// The members menu keeps the check glyph for the current member; a
+    /// member with a custom image icon shows that instead of its default
+    /// kind glyph. Emoji overrides skip the icon slot entirely — they ride
+    /// the item text as a colored prefix (FontIcon color-font support is
+    /// unreliable).
+    /// </summary>
+    private static IconElement? CreateMemberMenuIcon(
+        WidgetGroupMemberPresentation member,
+        bool isCurrent,
+        bool hasEmojiPrefix)
+    {
+        if (isCurrent)
+        {
+            return new FontIcon { Glyph = "\uE73E" };
+        }
+
+        if (hasEmojiPrefix)
+        {
+            return null;
+        }
+
+        if (WidgetTitleIconImageSourceFactory.TryCreate(
+                member.CustomTitleIconImagePath) is { } imageSource)
+        {
+            return new ImageIcon { Source = imageSource };
+        }
+
+        return new FontIcon { Glyph = member.Glyph };
     }
 
     private void AddGroupCommands(MenuFlyout flyout)
@@ -1228,7 +1268,9 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
             active.Glyph,
             active.IconKind,
             activeIndex,
-            presentation.Members.Count);
+            presentation.Members.Count,
+            active.CustomTitleIconEmoji,
+            active.CustomTitleIconImagePath);
     }
 
     private static int FindActiveFlagIndex(
@@ -1271,6 +1313,9 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         icon.Glyph = identity?.Glyph ?? string.Empty;
         icon.IconKind = identity?.IconKind ??
             WidgetTitleIconKindNames.Default;
+        icon.CustomEmoji = identity?.CustomTitleIconEmoji ?? string.Empty;
+        icon.CustomImageSource = WidgetTitleIconImageSourceFactory.TryCreate(
+            identity?.CustomTitleIconImagePath);
         icon.LabelText = identity?.Name ?? string.Empty;
         title.Text = identity?.Name ?? string.Empty;
     }
@@ -1287,5 +1332,7 @@ public sealed partial class WidgetGroupTitleSwitcher : UserControl
         string Glyph,
         string IconKind,
         int Index,
-        int Count);
+        int Count,
+        string CustomTitleIconEmoji = "",
+        string? CustomTitleIconImagePath = null);
 }

@@ -182,54 +182,10 @@ public sealed class MusicSettingsStoreTests : IDisposable
         Directory.Delete(store.StorePath);
     }
 
-    [Fact]
-    public void Pipeline_LeavesVersionAtLastSuccessWhenAMigrationFails()
-    {
-        var settings = new AppSettings { SchemaVersion = 5 };
-
-        bool applied = new SettingsMigrationPipeline(
-        [
-            new FakeMigration(5, succeeded: true),
-            new FakeMigration(6, succeeded: false),
-            new FakeMigration(7, succeeded: true)
-        ]).RunMigrations(settings);
-
-        // Partial progress is kept (so it is saved and not redone), the
-        // failed step is retried next launch, and later steps never run.
-        Assert.True(applied);
-        Assert.Equal(6, settings.SchemaVersion);
-    }
-
-    [Fact]
-    public void Pipeline_StampsCurrentVersionWhenAllMigrationsSucceed()
-    {
-        var settings = new AppSettings { SchemaVersion = 9 };
-
-        bool applied = new SettingsMigrationPipeline(
-        [
-            new FakeMigration(9, succeeded: true)
-        ]).RunMigrations(settings);
-
-        Assert.True(applied);
-        Assert.Equal(SettingsMigrationPipeline.CurrentSchemaVersion, settings.SchemaVersion);
-    }
-
-    [Fact]
-    public void Pipeline_StopsWhenARegistryGapIsDetected()
-    {
-        // Registry missing the 6->7 step: the old >= comparison ran 7->8
-        // directly and silently skipped it; exact-step matching must stop.
-        var settings = new AppSettings { SchemaVersion = 5 };
-
-        bool applied = new SettingsMigrationPipeline(
-        [
-            new FakeMigration(5, succeeded: true),
-            new FakeMigration(7, succeeded: true)
-        ]).RunMigrations(settings);
-
-        Assert.True(applied);
-        Assert.Equal(6, settings.SchemaVersion);
-    }
+    // The chain semantics themselves (copy-on-write, failed step keeps the
+    // last checkpoint, mid-chain registry gap) are pinned once by
+    // SettingsMigrationPipelineTests. The two cases below are the ones that
+    // file does not cover and that the pluginization profile relies on.
 
     [Fact]
     public void Pipeline_StopsWhenTrailingMigrationIsMissing()
@@ -239,13 +195,13 @@ public sealed class MusicSettingsStoreTests : IDisposable
         // steps that were never registered as applied.
         var settings = new AppSettings { SchemaVersion = 8 };
 
-        bool applied = new SettingsMigrationPipeline(
+        var (result, applied) = new SettingsMigrationPipeline(
         [
             new FakeMigration(8, succeeded: true)
-        ]).RunMigrations(settings);
+        ]).RunMigrationsOnCopy(settings);
 
         Assert.True(applied);
-        Assert.Equal(9, settings.SchemaVersion);
+        Assert.Equal(9, result.SchemaVersion);
     }
 
     [Fact]
@@ -253,15 +209,17 @@ public sealed class MusicSettingsStoreTests : IDisposable
     {
         // A step registered for a future schema version must never execute.
         var settings = new AppSettings { SchemaVersion = 9 };
+        var futureStep = new FakeMigration(SettingsMigrationPipeline.CurrentSchemaVersion, succeeded: true);
 
-        bool applied = new SettingsMigrationPipeline(
+        var (result, applied) = new SettingsMigrationPipeline(
         [
             new FakeMigration(9, succeeded: true),
-            new FakeMigration(10, succeeded: true)
-        ]).RunMigrations(settings);
+            futureStep
+        ]).RunMigrationsOnCopy(settings);
 
         Assert.True(applied);
-        Assert.Equal(SettingsMigrationPipeline.CurrentSchemaVersion, settings.SchemaVersion);
+        Assert.Equal(10, result.SchemaVersion);
+        Assert.False(futureStep.Applied);
     }
 
     [Fact]
@@ -282,12 +240,16 @@ public sealed class MusicSettingsStoreTests : IDisposable
     {
         public int FromVersion { get; } = fromVersion;
 
+        public bool Applied { get; private set; }
+
         public void Migrate(AppSettings settings)
         {
             if (!succeeded)
             {
                 throw new InvalidOperationException("Injected migration failure.");
             }
+
+            Applied = true;
         }
     }
 
@@ -297,7 +259,10 @@ public sealed class MusicSettingsStoreTests : IDisposable
         string pipelineSource = File.ReadAllText(TestPaths.SourceFile(
             "src/DeskBox/Services/SettingsMigrationService.cs"));
         Assert.Contains("new Migration_9_To_10()", pipelineSource, StringComparison.Ordinal);
-        Assert.Contains("CurrentSchemaVersion = 10", pipelineSource, StringComparison.Ordinal);
+        // The fork shipped schema v10; upstream's line later advanced the
+        // chain to v13 (screen-home model). v10 still carries the music
+        // store seeding, so the pin is the merged chain's top version.
+        Assert.Contains("CurrentSchemaVersion = 13", pipelineSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -307,8 +272,17 @@ public sealed class MusicSettingsStoreTests : IDisposable
             "src/DeskBox/Services/MusicSettingsStore.cs"));
         string migrationSource = File.ReadAllText(TestPaths.SourceFile(
             "src/DeskBox/Services/SettingsMigrationService.cs"));
-        string settingsVmSource = File.ReadAllText(TestPaths.SourceFile(
-            "src/DeskBox/ViewModels/SettingsViewModel.cs"));
+        // Merge note: upstream moved the music presentation editor out of the
+        // shell SettingsViewModel into the per-kind section editor, so the
+        // settings-page consumer chain is now MusicSettingsViewModel ->
+        // IFeatureWidgetsSettings -> FeatureWidgetsSettingsCoordinator, and the
+        // coordinator is what mirrors into the store. The invariant is
+        // unchanged: consumers reach the process-wide singleton instead of
+        // pinning a private cache, and the widget VM keeps its own field.
+        string sectionVmSource = File.ReadAllText(TestPaths.SourceFile(
+            "src/DeskBox/Features/Music/MusicSettingsViewModel.cs"));
+        string coordinatorSource = File.ReadAllText(TestPaths.SourceFile(
+            "src/DeskBox/Services/FeatureWidgetsSettingsCoordinator.cs"));
         string widgetVmSource = File.ReadAllText(TestPaths.SourceFile(
             "src/DeskBox/ViewModels/MusicWidgetViewModel.cs"));
 
@@ -317,13 +291,11 @@ public sealed class MusicSettingsStoreTests : IDisposable
         // updates (the live-sync regression this pins shut).
         Assert.Contains(
             "private readonly MusicSettingsStore _musicSettingsStore = MusicSettingsStore.Current;",
-            settingsVmSource,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "private readonly MusicSettingsStore _musicSettingsStore = MusicSettingsStore.Current;",
             widgetVmSource,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("new MusicSettingsStore()", settingsVmSource, StringComparison.Ordinal);
+        Assert.Contains("MusicSettingsStore.Current.Update(", coordinatorSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("new MusicSettingsStore()", coordinatorSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("new MusicSettingsStore()", sectionVmSource, StringComparison.Ordinal);
         Assert.DoesNotContain("new MusicSettingsStore()", widgetVmSource, StringComparison.Ordinal);
 
         // Persistence: writes go through the serialized chain enqueued under
@@ -342,7 +314,10 @@ public sealed class MusicSettingsStoreTests : IDisposable
         // wait on an async continuation (UI-thread startup deadlock).
         Assert.Contains("store.SaveSynchronously(migrated);", migrationSource, StringComparison.Ordinal);
         Assert.DoesNotContain("GetAwaiter().GetResult()", migrationSource, StringComparison.Ordinal);
-        Assert.Contains("settings.SchemaVersion = version;", migrationSource, StringComparison.Ordinal);
+        // Upstream's pipeline stamps the version on its renamed working copy
+        // (`working`) rather than the fork's `settings` receiver; the pin is
+        // the same statement under the merged naming.
+        Assert.Contains("working.SchemaVersion = version;", migrationSource, StringComparison.Ordinal);
     }
 
     private MusicSettingsStore CreateStore() =>

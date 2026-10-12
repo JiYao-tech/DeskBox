@@ -1,5 +1,6 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
+using DeskBox.Contracts;
 using DeskBox.Models;
 using DeskBox.Services;
 
@@ -39,6 +40,58 @@ public sealed class SettingsServiceTests : IDisposable
             SettingsService.NormalizeManagedStorageRootPath(
                 SettingsService.GetRecommendedManagedStorageRootPath()),
             service.Settings.DefaultManagedStorageRootPath);
+    }
+
+    [Fact]
+    public async Task SaveAsync_StreamsLockedSnapshotAndStaysReloadable()
+    {
+        // The streamed persistence path (serialize straight into the store
+        // temp file under _lock) must round-trip exactly like the buffered
+        // path it replaced: save, reload in a fresh service, same values.
+        var service = new SettingsService(_settingsRoot);
+        await service.LoadAsync();
+        service.Settings.SearchMaxResults = 100;
+
+        await service.SaveAsync();
+
+        var reloaded = new SettingsService(_settingsRoot);
+        await reloaded.LoadAsync();
+        Assert.Equal(
+            SettingsLoadRecoveryState.Primary,
+            reloaded.LastLoadRecoveryState);
+        Assert.Equal(100, reloaded.Settings.SearchMaxResults);
+    }
+
+    [Fact]
+    public async Task SaveCheckedAsync_FailureDuringSaveReportsFailureAndKeepsLastGoodStoreUsable()
+    {
+        var service = new SettingsService(_settingsRoot);
+        await service.LoadAsync();
+        service.Settings.SearchMaxResults = 100;
+        await service.SaveAsync();
+
+        // Sabotage: replace the settings directory with a file so the next
+        // save cannot even stage its temp file.
+        string movedAside = _settingsRoot + "-moved";
+        Directory.Move(_settingsRoot, movedAside);
+        File.WriteAllText(_settingsRoot, "not a directory");
+
+        bool saved = await service.SaveCheckedAsync();
+
+        Assert.False(saved);
+        Assert.NotNull(service.LastPersistenceFailure);
+        Assert.Equal("save", service.LastPersistenceFailure!.Operation);
+
+        // The last good store is untouched and fully recoverable: restore
+        // the directory and a fresh service must load it from primary.
+        File.Delete(_settingsRoot);
+        Directory.Move(movedAside, _settingsRoot);
+        var recovered = new SettingsService(_settingsRoot);
+        await recovered.LoadAsync();
+        Assert.Equal(
+            SettingsLoadRecoveryState.Primary,
+            recovered.LastLoadRecoveryState);
+        Assert.Equal(100, recovered.Settings.SearchMaxResults);
     }
 
     [Theory]
@@ -88,6 +141,141 @@ public sealed class SettingsServiceTests : IDisposable
             persisted.RootElement
                 .GetProperty("hiddenCacheCleanupDelaySeconds")
                 .GetInt32());
+    }
+
+    [Fact]
+    public async Task LoadAsync_MigratesLegacySchemaFiveProfileThroughTheFullChainToThirteen()
+    {
+        // A realistic settings.json as an older DeskBox build would have left
+        // it on disk: widgets with geometry, Everything consent captured under
+        // the retired local-index model, the all-or-nothing decorative
+        // animation switch, and the legacy stack master switch turned off.
+        // Loading it must run the real 5→9 chain and rewrite the store.
+        string settingsPath = Path.Combine(_settingsRoot, "settings.json");
+        await File.WriteAllTextAsync(
+            settingsPath,
+            """
+            {
+              "schemaVersion": 5,
+              "language": "en-US",
+              "searchMaxResults": 100,
+              "searchEverythingEnabled": true,
+              "searchEverythingExecutablePath": "C:\\Portable\\Everything.exe",
+              "searchEverythingAdvancedSyntaxEnabled": true,
+              "enableContinuousDecorativeAnimations": true,
+              "fileStacksEnabled": false,
+              "fileStackGroupBy": "Custom",
+              "fileStackThreshold": 5,
+              "fileStackCustomRules": [
+                {
+                  "id": "stack-rule-media",
+                  "name": "Media",
+                  "extensions": [".png", ".mp4"]
+                }
+              ],
+              "widgets": [
+                {
+                  "id": "desktop-files",
+                  "name": "Desktop Files",
+                  "widgetKind": "File",
+                  "x": 120,
+                  "y": 80,
+                  "width": 420,
+                  "height": 360,
+                  "mappedFolderPath": "C:\\Users\\user\\Desktop"
+                },
+                {
+                  "id": "tasks",
+                  "name": "Tasks",
+                  "widgetKind": "Todo",
+                  "x": 200,
+                  "y": 300,
+                  "width": 320,
+                  "height": 240
+                }
+              ]
+            }
+            """);
+
+        var service = new SettingsService(_settingsRoot);
+        await service.LoadAsync();
+
+        Assert.Equal(SettingsLoadRecoveryState.Primary, service.LastLoadRecoveryState);
+        Assert.Equal(SettingsMigrationPipeline.CurrentSchemaVersion, service.Settings.SchemaVersion);
+        Assert.Equal(13, service.Settings.SchemaVersion);
+
+        // Widgets survive the chain (and the layout-store adoption): both
+        // instances keep their identity, kind, and legacy geometry — the 5→6
+        // hop must not move a window while capturing the first topology.
+        WidgetConfig fileWidget = Assert.Single(
+            service.Settings.Widgets,
+            widget => widget.Id == "desktop-files");
+        WidgetConfig todoWidget = Assert.Single(
+            service.Settings.Widgets,
+            widget => widget.Id == "tasks");
+        Assert.Equal(WidgetKind.File, fileWidget.WidgetKind);
+        Assert.Equal(WidgetKind.Todo, todoWidget.WidgetKind);
+        Assert.Equal(120, fileWidget.X);
+        Assert.Equal(80, fileWidget.Y);
+        Assert.Equal(420, fileWidget.Width);
+        Assert.Equal(360, fileWidget.Height);
+
+        // 11→12 (screen-home model): the legacy widgets keep their geometry
+        // and gain Unbound homes — no profiles exist yet to infer from, and
+        // the legacy entries carry no stable monitor ids.
+        Assert.Equal(WidgetScreenBindingMode.Unbound, fileWidget.ScreenBindingMode);
+        Assert.Equal(WidgetScreenBindingMode.Unbound, todoWidget.ScreenBindingMode);
+        Assert.Equal(
+            SettingsService.WidgetNewPlacementCursorDisplay,
+            service.Settings.WidgetNewPlacementTarget);
+
+        // 5→6: bounded topology layouts start empty; legacy geometry stays
+        // the active truth until the first stable startup captures it.
+        Assert.NotNull(service.Settings.WidgetTopologyLayouts);
+        Assert.Empty(service.Settings.WidgetTopologyLayouts);
+        Assert.Null(service.Settings.ActiveWidgetTopologyKey);
+
+        // 6→7: the retired local filename index needs fresh consent, so all
+        // three Everything settings reset regardless of the stored values.
+        Assert.False(service.Settings.SearchEverythingEnabled);
+        Assert.Equal(string.Empty, service.Settings.SearchEverythingExecutablePath);
+        Assert.False(service.Settings.SearchEverythingAdvancedSyntaxEnabled);
+
+        // 7→8: the all-or-nothing decorative switch fans out to the
+        // individual effects; glance rotation becomes independent and on.
+        Assert.True(service.Settings.EnableTextMarqueeAnimations);
+        Assert.True(service.Settings.EnableVinylRotationAnimations);
+        Assert.True(service.Settings.EnableCompactAmbientAnimations);
+        Assert.True(service.Settings.EnableGlanceImageAutoRotation);
+
+        // 8→9: legacy stacks off becomes (master on, auto off) so manual
+        // stacks stay visible, and the stack details ride along untouched.
+        Assert.True(service.Settings.FileStacksEnabled);
+        Assert.False(service.Settings.FileStackAutoStacking);
+        Assert.Equal(SettingsService.FileStackGroupByCustom, service.Settings.FileStackGroupBy);
+        Assert.Equal(5, service.Settings.FileStackThreshold);
+        FileStackCustomRule rule = Assert.Single(service.Settings.FileStackCustomRules);
+        Assert.Equal("stack-rule-media", rule.Id);
+        Assert.Equal([".png", ".mp4"], rule.Extensions);
+        Assert.Equal(SettingsService.LanguageEnglish, service.Settings.Language);
+        Assert.Equal(100, service.Settings.SearchMaxResults);
+
+        // The migrated profile is persisted back at the current schema.
+        using JsonDocument persisted = JsonDocument.Parse(
+            await File.ReadAllTextAsync(settingsPath));
+        Assert.Equal(13, persisted.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.True(persisted.RootElement.GetProperty("fileStacksEnabled").GetBoolean());
+        Assert.False(persisted.RootElement.GetProperty("fileStackAutoStacking").GetBoolean());
+
+        // A fresh load of the rewritten store re-migrates nothing and still
+        // has both widgets: the migration write is durable and complete.
+        var reloaded = new SettingsService(_settingsRoot);
+        await reloaded.LoadAsync();
+        Assert.Equal(SettingsLoadRecoveryState.Primary, reloaded.LastLoadRecoveryState);
+        Assert.Equal(13, reloaded.Settings.SchemaVersion);
+        Assert.True(reloaded.Settings.FileStacksEnabled);
+        Assert.False(reloaded.Settings.FileStackAutoStacking);
+        Assert.Equal(2, reloaded.Settings.Widgets.Count);
     }
 
     [Fact]
@@ -416,12 +604,18 @@ public sealed class SettingsServiceTests : IDisposable
 
         await service.SaveAsync(notifySubscribers: false);
         using JsonDocument saved = JsonDocument.Parse(await File.ReadAllTextAsync(settingsPath));
+        Assert.False(saved.RootElement.TryGetProperty("Widgets", out _));
+
+        // The adopted layout store is authoritative for the widgets key; its
+        // string-enum profile must round-trip the same names settings.json
+        // used to write.
+        using JsonDocument layout = JsonDocument.Parse(
+            await File.ReadAllTextAsync(Path.Combine(_settingsRoot, "widget-layout.json")));
         JsonElement savedWidget = Assert.Single(
-            saved.RootElement.GetProperty("widgets").EnumerateArray());
+            layout.RootElement.GetProperty("layout").GetProperty("widgets").EnumerateArray());
         Assert.Equal("File", savedWidget.GetProperty("widgetKind").GetString());
         Assert.Equal("List", savedWidget.GetProperty("viewMode").GetString());
         Assert.Equal("Manual", savedWidget.GetProperty("sortMode").GetString());
-        Assert.False(saved.RootElement.TryGetProperty("Widgets", out _));
     }
 
     [Fact]
@@ -1002,6 +1196,55 @@ public sealed class SettingsServiceTests : IDisposable
             service.Settings.WidgetAnimationSlideDirection);
     }
 
+    [Theory]
+    [InlineData(SettingsService.WidgetAnimationEffectEdgeScale)]
+    [InlineData(SettingsService.WidgetAnimationEffectTilt)]
+    [InlineData(SettingsService.WidgetAnimationEffectWipe)]
+    public async Task LoadAsync_PreservesDirectionalStationaryEffects(string effect)
+    {
+        // The persistence whitelist once knew only the four legacy effects
+        // and rewrote every new effect back to SlideFade on the next
+        // save/load cycle, which the user saw as "the effect drifts back to
+        // slide after a few toggles". These effects consume the direction
+        // too, so the stored direction must survive with them.
+        var settings = new AppSettings
+        {
+            WidgetAnimationEffect = effect,
+            WidgetAnimationSlideDirection = SettingsService.WidgetAnimationSlideDirectionUp
+        };
+        await File.WriteAllTextAsync(
+            Path.Combine(_settingsRoot, "settings.json"),
+            JsonSerializer.Serialize(settings, s_jsonOptions));
+
+        var service = new SettingsService(_settingsRoot);
+        await service.LoadAsync();
+
+        Assert.Equal(effect, service.Settings.WidgetAnimationEffect);
+        Assert.Equal(
+            SettingsService.WidgetAnimationSlideDirectionUp,
+            service.Settings.WidgetAnimationSlideDirection);
+    }
+
+    [Fact]
+    public async Task LoadAsync_PreservesSpringEasingIntensity()
+    {
+        var settings = new AppSettings
+        {
+            WidgetAnimationEffect = SettingsService.WidgetAnimationEffectFade,
+            WidgetAnimationEasingIntensity = SettingsService.WidgetAnimationEasingSpring
+        };
+        await File.WriteAllTextAsync(
+            Path.Combine(_settingsRoot, "settings.json"),
+            JsonSerializer.Serialize(settings, s_jsonOptions));
+
+        var service = new SettingsService(_settingsRoot);
+        await service.LoadAsync();
+
+        Assert.Equal(
+            SettingsService.WidgetAnimationEasingSpring,
+            service.Settings.WidgetAnimationEasingIntensity);
+    }
+
     [Fact]
     public async Task LoadAsync_MigratesRemovedNoAnimationOptionToStandardSlideFade()
     {
@@ -1544,8 +1787,116 @@ public sealed class SettingsServiceTests : IDisposable
         Assert.Equal(expected, SettingsService.SupportsWidgetOpacity(materialType));
     }
 
+    [Theory]
+    [InlineData(StartupMode.Standard)]
+    [InlineData(StartupMode.ScheduledTask)]
+    public async Task StartupMode_RoundTripsWithoutEnablingStartup(StartupMode mode)
+    {
+        var service = new SettingsService(_settingsRoot);
+        service.Settings.AutoStart = false;
+        service.Settings.AutoStartDefaultApplied = true;
+        service.Settings.AutoStartMode = mode;
+        await service.SaveAsync(notifySubscribers: false);
+        var restored = new SettingsService(_settingsRoot);
+        await restored.LoadAsync();
+        Assert.Equal(mode, restored.Settings.AutoStartMode);
+        Assert.False(restored.Settings.AutoStart);
+        Assert.True(restored.Settings.AutoStartDefaultApplied);
+    }
+
+    [Fact]
+    public void NormalizeScreenBindings_DowngradesWidgetPinsWithBlankBoundScreenId()
+    {
+        var pinnedBlank = new WidgetConfig
+        {
+            Id = "pinned-blank",
+            ScreenBindingMode = WidgetScreenBindingMode.Pinned,
+            BoundScreenId = ""
+        };
+        var pinnedWhitespace = new WidgetConfig
+        {
+            Id = "pinned-whitespace",
+            ScreenBindingMode = WidgetScreenBindingMode.Pinned,
+            BoundScreenId = "   "
+        };
+        var pinnedValid = new WidgetConfig
+        {
+            Id = "pinned-valid",
+            ScreenBindingMode = WidgetScreenBindingMode.Pinned,
+            BoundScreenId = "external-panel"
+        };
+        var followPrimary = new WidgetConfig
+        {
+            Id = "follow-primary",
+            ScreenBindingMode = WidgetScreenBindingMode.FollowPrimary,
+            BoundScreenId = null
+        };
+        var unboundWithId = new WidgetConfig
+        {
+            Id = "unbound-with-id",
+            ScreenBindingMode = WidgetScreenBindingMode.Unbound,
+            BoundScreenId = "external-panel"
+        };
+        var settings = new AppSettings
+        {
+            Widgets = [pinnedBlank, pinnedWhitespace, pinnedValid, followPrimary, unboundWithId]
+        };
+
+        SettingsService.NormalizeScreenBindings(settings);
+
+        Assert.Equal(WidgetScreenBindingMode.Unbound, pinnedBlank.ScreenBindingMode);
+        Assert.Null(pinnedBlank.BoundScreenId);
+        Assert.Equal(WidgetScreenBindingMode.Unbound, pinnedWhitespace.ScreenBindingMode);
+        Assert.Null(pinnedWhitespace.BoundScreenId);
+        Assert.Equal(WidgetScreenBindingMode.Pinned, pinnedValid.ScreenBindingMode);
+        Assert.Equal("external-panel", pinnedValid.BoundScreenId);
+        Assert.Equal(WidgetScreenBindingMode.FollowPrimary, followPrimary.ScreenBindingMode);
+        // Unbound entries keep a leftover id: normalization only repairs pins
+        // whose resolution would dead-end on the empty reference.
+        Assert.Equal(WidgetScreenBindingMode.Unbound, unboundWithId.ScreenBindingMode);
+        Assert.Equal("external-panel", unboundWithId.BoundScreenId);
+    }
+
+    [Fact]
+    public void NormalizeScreenBindings_DowngradesGroupPinsWithBlankBoundScreenId()
+    {
+        var pinnedBlank = new WidgetGroupConfig
+        {
+            Id = "group-blank",
+            ScreenBindingMode = WidgetScreenBindingMode.Pinned,
+            BoundScreenId = " "
+        };
+        var pinnedValid = new WidgetGroupConfig
+        {
+            Id = "group-valid",
+            ScreenBindingMode = WidgetScreenBindingMode.Pinned,
+            BoundScreenId = "panel"
+        };
+        var unbound = new WidgetGroupConfig
+        {
+            Id = "group-unbound",
+            ScreenBindingMode = WidgetScreenBindingMode.Unbound,
+            BoundScreenId = null
+        };
+        var settings = new AppSettings
+        {
+            WidgetGroups = [pinnedBlank, pinnedValid, unbound]
+        };
+
+        SettingsService.NormalizeScreenBindings(settings);
+
+        Assert.Equal(WidgetScreenBindingMode.Unbound, pinnedBlank.ScreenBindingMode);
+        Assert.Null(pinnedBlank.BoundScreenId);
+        Assert.Equal(WidgetScreenBindingMode.Pinned, pinnedValid.ScreenBindingMode);
+        Assert.Equal("panel", pinnedValid.BoundScreenId);
+        Assert.Equal(WidgetScreenBindingMode.Unbound, unbound.ScreenBindingMode);
+        Assert.Null(unbound.BoundScreenId);
+    }
+
     private static object? CreateNonDefaultSettingValue(Type type, object? defaultValue)
     {
+        if (Nullable.GetUnderlyingType(type) is { IsEnum: true } enumType)
+            return Enum.GetValues(enumType).Cast<object>().First(value => !Equals(value, defaultValue));
         if (type == typeof(string))
         {
             return $"{defaultValue}-changed";
@@ -1574,6 +1925,16 @@ public sealed class SettingsServiceTests : IDisposable
         if (type == typeof(double))
         {
             return (double)(defaultValue ?? 0d) + 0.137;
+        }
+
+        if (type == typeof(double?))
+        {
+            return (defaultValue as double? ?? 0d) + 0.137;
+        }
+
+        if (type == typeof(long))
+        {
+            return (long)(defaultValue ?? 0L) + 123456789012345L;
         }
 
         if (type == typeof(DateTimeOffset?))

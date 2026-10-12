@@ -5,6 +5,7 @@ using System.Security.Principal;
 using System.Text;
 #endif
 using DeskBox.Helpers;
+using DeskBox.Platform;
 using Microsoft.Win32;
 
 namespace DeskBox.Services;
@@ -50,6 +51,18 @@ public sealed record DragDropPermissionRepairResult(
     int RepairedCount,
     string FailureMessage,
     bool RequiresStartupSettings);
+
+/// <summary>
+/// Lightweight elevation snapshot for the launch gate: unlike
+/// <see cref="DragDropPermissionService.Diagnose"/>, it touches no shortcuts,
+/// startup registrations, or pending diagnostics — only the current token,
+/// the Explorer token, and the UAC policy.
+/// </summary>
+public sealed record StartupElevationAssessment(
+    bool IsCurrentProcessElevated,
+    bool IsExplorerElevated,
+    bool IsUacDisabled,
+    bool CanRelaunchUnelevated);
 
 public static class DragDropPermissionService
 {
@@ -167,13 +180,74 @@ public static class DragDropPermissionService
             needsRelaunch);
     }
 
-    public static DragDropPermissionRepairResult Repair(SettingsService settingsService)
+    /// <summary>
+    /// Single source of truth for "is this process elevated".
+    /// WindowsPrincipal.IsInRole is false on a UAC filtered token (the
+    /// Administrators group is deny-only there) and true on the elevated
+    /// token — unlike an Owner-vs-User comparison, which merely reports
+    /// whether the *user* sits in the Administrators group (a filtered
+    /// token's default owner stays the Administrators SID) and therefore
+    /// misfires on every admin-account machine.
+    /// </summary>
+    public static bool IsCurrentProcessElevated()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static StartupElevationAssessment AssessStartupElevation()
+    {
+        ProcessTokenSnapshot currentToken = GetCurrentProcessTokenSnapshot();
+        if (currentToken.IsElevated != true)
+        {
+            return new StartupElevationAssessment(
+                IsCurrentProcessElevated: false,
+                IsExplorerElevated: false,
+                IsUacDisabled: false,
+                CanRelaunchUnelevated: false);
+        }
+
+        ProcessTokenSnapshot explorerToken = GetExplorerTokenSnapshot();
+        UacPolicySnapshot uacPolicy = GetUacPolicySnapshot();
+        bool isUacDisabled = uacPolicy.EnableLua == 0;
+        bool isExplorerElevated = explorerToken.IsElevated == true;
+        return new StartupElevationAssessment(
+            IsCurrentProcessElevated: true,
+            IsExplorerElevated: isExplorerElevated,
+            IsUacDisabled: isUacDisabled,
+            CanRelaunchUnelevated: ComputeCanRelaunchUnelevated(isUacDisabled, isExplorerElevated));
+    }
+
+    /// <summary>
+    /// Stricter than Diagnose's NeedsRelaunch: the Explorer-parent relaunch
+    /// only produces an unelevated instance when Explorer itself runs
+    /// unelevated (with UAC on). With UAC off — or an elevated Explorer —
+    /// the parent-process handover would spawn another elevated instance,
+    /// so the notice must explain instead of offering a restart.
+    /// </summary>
+    public static bool ComputeCanRelaunchUnelevated(bool isUacDisabled, bool isExplorerElevated)
+    {
+        return !isUacDisabled && !isExplorerElevated;
+    }
+
+    /// <summary>
+    /// Removes the AppCompat RUNASADMIN-style layers that keep relaunching
+    /// DeskBox elevated. Used by Repair and by the launch gate before an
+    /// unelevated relaunch, so the next start is not elevated again.
+    /// Failures go to <paramref name="failures"/> when supplied (Repair's
+    /// report), otherwise to the log only (launch path).
+    /// </summary>
+    public static int ClearElevationCompatibilityFlags(List<string>? failures = null)
     {
         string currentExePath = GetCurrentExePath();
-        var before = Diagnose();
-        int repairedCount = 0;
-        List<string> failures = [];
-        bool requiresStartupSettings = false;
+        int clearedCount = 0;
 
         foreach (var entry in GetRelevantAppCompatEntries(currentExePath))
         {
@@ -184,22 +258,50 @@ public static class DragDropPermissionService
 
             try
             {
-                if (entry.Root.OpenSubKey(AppCompatLayersKey, writable: true) is { } key)
+                // The per-user branch deliberately bypasses the current-user
+                // hive shortcut: inside an MSIX container that view is
+                // copy-on-write virtualized, so the delete would land in the
+                // package-private hive while the real layer survives (and the
+                // repair would count it as cleared). HKLM only accepts writes
+                // when the process is elevated, which the failure list
+                // already covers.
+                RegistryKey? key = entry.RootName == PerUserRootName
+                    ? OpenPerUserAppCompatLayersKey(writable: true)
+                    : Registry.LocalMachine.OpenSubKey(AppCompatLayersKey, writable: true);
+                if (key is not null)
                 {
                     using (key)
                     {
                         key.DeleteValue(entry.ExePath, throwOnMissingValue: false);
                     }
 
-                    repairedCount++;
+                    clearedCount++;
                     App.Log($"[DragDropPermission] Removed AppCompat layer root={entry.RootName} path='{entry.ExePath}' value='{entry.Value}'");
                 }
             }
             catch (Exception ex)
             {
-                failures.Add($"AppCompat {entry.ExePath}: {ex.Message}");
+                if (failures is null)
+                {
+                    App.Log($"[DragDropPermission] AppCompat clear failed for '{entry.ExePath}': {ex.Message}");
+                }
+                else
+                {
+                    failures.Add($"AppCompat {entry.ExePath}: {ex.Message}");
+                }
             }
         }
+
+        return clearedCount;
+    }
+
+    public static DragDropPermissionRepairResult Repair(SettingsService settingsService)
+    {
+        string currentExePath = GetCurrentExePath();
+        var before = Diagnose();
+        List<string> failures = [];
+        bool requiresStartupSettings = false;
+        int repairedCount = ClearElevationCompatibilityFlags(failures);
 
         try
         {
@@ -241,7 +343,11 @@ public static class DragDropPermissionService
                     continue;
                 }
 
-                CreateOrUpdateShortcut(shortcut.Path, currentExePath, shortcut.Arguments);
+                CreateOrUpdateShortcut(
+                    shortcut.Path,
+                    currentExePath,
+                    shortcut.Arguments,
+                    DeskBoxIconPath);
                 repairedCount++;
                 App.Log($"[DragDropPermission] Rewrote shortcut '{shortcut.Path}' target='{currentExePath}' args='{shortcut.Arguments}'");
             }
@@ -263,7 +369,15 @@ public static class DragDropPermissionService
             requiresStartupSettings);
     }
 
-    public static bool TryRelaunchAsExplorerUser()
+    /// <summary>
+    /// Relaunches this executable at Explorer's (standard-user) integrity via
+    /// PROC_THREAD_ATTRIBUTE_PARENT_PROCESS. When <paramref name="additionalArguments"/>
+    /// is given it is appended to the new instance's command line — the launch
+    /// gate passes "--await-parent-exit &lt;pid&gt;" (plus "--startup" for
+    /// unattended launches) so the new instance waits out the elevated
+    /// holder of the single-instance mutex instead of racing it.
+    /// </summary>
+    public static bool TryRelaunchAsExplorerUser(string additionalArguments = "")
     {
         string exePath = GetCurrentExePath();
         if (!File.Exists(exePath))
@@ -271,19 +385,19 @@ public static class DragDropPermissionService
             return false;
         }
 
-        IntPtr shellWindow = GetShellWindow();
+        IntPtr shellWindow = DragDropPermissionNativeMethods.GetShellWindow();
         if (shellWindow == IntPtr.Zero)
         {
             return TryShellExecute(exePath);
         }
 
-        GetWindowThreadProcessId(shellWindow, out uint explorerProcessId);
+        DragDropPermissionNativeMethods.GetWindowThreadProcessId(shellWindow, out uint explorerProcessId);
         if (explorerProcessId == 0)
         {
             return TryShellExecute(exePath);
         }
 
-        IntPtr processHandle = OpenProcess(ProcessCreateProcess | ProcessQueryLimitedInformation, false, explorerProcessId);
+        IntPtr processHandle = DragDropPermissionNativeMethods.OpenProcess(ProcessCreateProcess | ProcessQueryLimitedInformation, false, explorerProcessId);
         if (processHandle == IntPtr.Zero)
         {
             return TryShellExecute(exePath);
@@ -291,21 +405,21 @@ public static class DragDropPermissionService
 
         try
         {
-            var startupInfo = new StartupInfo();
-            startupInfo.cb = Marshal.SizeOf<StartupInfo>();
-            var processInformation = new ProcessInformation();
+            var startupInfo = new DragDropPermissionNativeMethods.StartupInfo();
+            startupInfo.cb = Marshal.SizeOf<DragDropPermissionNativeMethods.StartupInfo>();
+            var processInformation = new DragDropPermissionNativeMethods.ProcessInformation();
             int attributeListSize = 0;
-            _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+            _ = DragDropPermissionNativeMethods.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
             IntPtr attributeList = Marshal.AllocHGlobal(attributeListSize);
             try
             {
-                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                if (!DragDropPermissionNativeMethods.InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
                 {
                     return TryShellExecute(exePath);
                 }
 
                 IntPtr parentProcessValue = processHandle;
-                if (!UpdateProcThreadAttribute(
+                if (!DragDropPermissionNativeMethods.UpdateProcThreadAttribute(
                         attributeList,
                         0,
                         (IntPtr)ProcThreadAttributeParentProcess,
@@ -318,8 +432,10 @@ public static class DragDropPermissionService
                 }
 
                 startupInfo.lpAttributeList = attributeList;
-                string commandLine = $"\"{exePath}\"";
-                bool created = CreateProcess(
+                string commandLine = string.IsNullOrWhiteSpace(additionalArguments)
+                    ? $"\"{exePath}\""
+                    : $"\"{exePath}\" {additionalArguments.Trim()}";
+                bool created = DragDropPermissionNativeMethods.CreateProcess(
                     null,
                     commandLine,
                     IntPtr.Zero,
@@ -336,22 +452,22 @@ public static class DragDropPermissionService
                     return TryShellExecute(exePath);
                 }
 
-                CloseHandle(processInformation.hThread);
-                CloseHandle(processInformation.hProcess);
+                DragDropPermissionNativeMethods.CloseHandle(processInformation.hThread);
+                DragDropPermissionNativeMethods.CloseHandle(processInformation.hProcess);
                 return true;
             }
             finally
             {
                 if (attributeList != IntPtr.Zero)
                 {
-                    DeleteProcThreadAttributeList(attributeList);
+                    DragDropPermissionNativeMethods.DeleteProcThreadAttributeList(attributeList);
                     Marshal.FreeHGlobal(attributeList);
                 }
             }
         }
         finally
         {
-            CloseHandle(processHandle);
+            DragDropPermissionNativeMethods.CloseHandle(processHandle);
         }
     }
 
@@ -441,16 +557,56 @@ public static class DragDropPermissionService
         }
 
         var entries = new List<AppCompatEntry>();
-        AddAppCompatEntries(entries, Registry.CurrentUser, "HKCU", paths);
-        AddAppCompatEntries(entries, Registry.LocalMachine, "HKLM", paths);
+        // Both sides of the per-user branch (read and clear) go through
+        // HKU\<SID>: under MSIX, a virtualized delete from an earlier Store
+        // build can even tombstone the value in the container's private
+        // hive, hiding the still-present real layer from HKCU reads here.
+        AddAppCompatEntries(
+            entries,
+            () => OpenPerUserAppCompatLayersKey(writable: false),
+            PerUserRootName,
+            paths);
+        AddAppCompatEntries(
+            entries,
+            () => Registry.LocalMachine.OpenSubKey(AppCompatLayersKey),
+            "HKLM",
+            paths);
         return entries;
     }
 
-    private static void AddAppCompatEntries(List<AppCompatEntry> entries, RegistryKey root, string rootName, HashSet<string> relevantPaths)
+    private const string PerUserRootName = "HKCU";
+
+    /// <summary>
+    /// Opens the current user's AppCompat Layers key through HKU\<SID>
+    /// instead of HKCU. Same rationale as the Run entry store: explicit user
+    /// identity bypasses the MSIX copy-on-write registry virtualization that
+    /// would otherwise swallow Repair's deletes (and mask prior virtualized
+    /// deletes from diagnose reads) in packaged builds.
+    /// </summary>
+    private static RegistryKey? OpenPerUserAppCompatLayersKey(bool writable)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        string? sid = identity.User?.Value;
+        if (string.IsNullOrWhiteSpace(sid))
+        {
+            return null;
+        }
+
+        using RegistryKey users = RegistryKey.OpenBaseKey(
+            RegistryHive.Users,
+            RegistryView.Default);
+        return users.OpenSubKey($@"{sid}\{AppCompatLayersKey}", writable);
+    }
+
+    private static void AddAppCompatEntries(
+        List<AppCompatEntry> entries,
+        Func<RegistryKey?> openKey,
+        string rootName,
+        HashSet<string> relevantPaths)
     {
         try
         {
-            using var key = root.OpenSubKey(AppCompatLayersKey);
+            using var key = openKey();
             if (key is null)
             {
                 return;
@@ -465,7 +621,7 @@ public static class DragDropPermissionService
 
                 if (key.GetValue(valueName) is string value && !string.IsNullOrWhiteSpace(value))
                 {
-                    entries.Add(new AppCompatEntry(root, rootName, valueName, value));
+                    entries.Add(new AppCompatEntry(rootName, valueName, value));
                 }
             }
         }
@@ -677,7 +833,17 @@ public static class DragDropPermissionService
     }
 #endif
 
-    internal static void CreateOrUpdateShortcut(string shortcutPath, string targetPath, string arguments)
+    // Icon of the DeskBox application itself, for shortcuts whose target is
+    // DeskBox.exe. Shortcuts to user files must pass null instead so the
+    // system renders the target's own icon (see Shell Links docs).
+    internal static readonly string DeskBoxIconPath =
+        Path.Combine(AppContext.BaseDirectory, "Assets", "deskbox.ico");
+
+    internal static void CreateOrUpdateShortcut(
+        string shortcutPath,
+        string targetPath,
+        string arguments,
+        string? iconPath)
     {
         string? directory = Path.GetDirectoryName(shortcutPath);
         if (!string.IsNullOrWhiteSpace(directory))
@@ -686,14 +852,14 @@ public static class DragDropPermissionService
         }
 
         string workingDirectory = Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory;
-        string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "deskbox.ico");
+        string effectiveIconPath = iconPath ?? string.Empty;
 #if DESKBOX_NATIVE_AOT
         var metadata = new ShortcutInfo(
             targetPath,
             string.Empty,
             arguments,
             workingDirectory,
-            iconPath,
+            effectiveIconPath,
             0);
         ShortcutNativeWriteCallResult native =
             ShortcutNativeBackend.WriteShortcut(shortcutPath, metadata);
@@ -713,7 +879,7 @@ public static class DragDropPermissionService
                 string.Empty,
                 arguments,
                 workingDirectory,
-                iconPath,
+                effectiveIconPath,
                 0);
             ShortcutNativeWriteCallResult native =
                 ShortcutNativeBackend.WriteShortcut(shortcutPath, metadata);
@@ -746,13 +912,19 @@ public static class DragDropPermissionService
         string targetPath,
         string arguments,
         string workingDirectory,
-        string iconPath)
+        string? iconPath)
     {
         var shellLink = (IShellLinkW)(object)new ShellLink();
         shellLink.SetPath(targetPath);
         shellLink.SetArguments(arguments);
         shellLink.SetWorkingDirectory(workingDirectory);
-        shellLink.SetIconLocation(iconPath, 0);
+        if (!string.IsNullOrWhiteSpace(iconPath))
+        {
+            // No icon location means the system uses the target's own icon
+            // plus the shortcut overlay — the Explorer-native default.
+            shellLink.SetIconLocation(iconPath, 0);
+        }
+
         var persistFile = (System.Runtime.InteropServices.ComTypes.IPersistFile)shellLink;
         persistFile.Save(shortcutPath, true);
     }
@@ -764,7 +936,7 @@ public static class DragDropPermissionService
         {
             using var identity = WindowsIdentity.GetCurrent();
             var principal = new WindowsPrincipal(identity);
-            IntPtr currentProcess = GetCurrentProcess();
+            IntPtr currentProcess = DragDropPermissionNativeMethods.GetCurrentProcess();
             return CreateProcessTokenSnapshot(
                 Environment.ProcessId,
                 "DeskBox",
@@ -787,7 +959,7 @@ public static class DragDropPermissionService
                 return ProcessTokenSnapshot.Unknown(0, "explorer", "not-running");
             }
 
-            IntPtr processHandle = OpenProcess(ProcessQueryLimitedInformation, false, (uint)explorer.Id);
+            IntPtr processHandle = DragDropPermissionNativeMethods.OpenProcess(ProcessQueryLimitedInformation, false, (uint)explorer.Id);
             if (processHandle == IntPtr.Zero)
             {
                 return ProcessTokenSnapshot.Unknown(explorer.Id, explorer.ProcessName, $"open-error:{Marshal.GetLastWin32Error()}");
@@ -799,7 +971,7 @@ public static class DragDropPermissionService
             }
             finally
             {
-                CloseHandle(processHandle);
+                DragDropPermissionNativeMethods.CloseHandle(processHandle);
             }
         }
         catch (Exception ex)
@@ -899,23 +1071,23 @@ public static class DragDropPermissionService
     private static bool TryGetTokenElevation(IntPtr processHandle, out bool isElevated)
     {
         isElevated = false;
-        if (!OpenProcessToken(processHandle, TokenQuery, out IntPtr tokenHandle))
+        if (!DragDropPermissionNativeMethods.OpenProcessToken(processHandle, TokenQuery, out IntPtr tokenHandle))
         {
             return false;
         }
 
         try
         {
-            int length = Marshal.SizeOf<TokenElevation>();
+            int length = Marshal.SizeOf<DragDropPermissionNativeMethods.TokenElevation>();
             IntPtr buffer = Marshal.AllocHGlobal(length);
             try
             {
-                if (!GetTokenInformation(tokenHandle, TokenInformationClass.TokenElevation, buffer, length, out _))
+                if (!DragDropPermissionNativeMethods.GetTokenInformation(tokenHandle, DragDropPermissionNativeMethods.TokenInformationClass.TokenElevation, buffer, length, out _))
                 {
                     return false;
                 }
 
-                var elevation = Marshal.PtrToStructure<TokenElevation>(buffer);
+                var elevation = Marshal.PtrToStructure<DragDropPermissionNativeMethods.TokenElevation>(buffer);
                 isElevated = elevation.TokenIsElevated != 0;
                 return true;
             }
@@ -926,21 +1098,21 @@ public static class DragDropPermissionService
         }
         finally
         {
-            CloseHandle(tokenHandle);
+            DragDropPermissionNativeMethods.CloseHandle(tokenHandle);
         }
     }
 
     private static bool TryGetIntegrityLevel(IntPtr processHandle, out string level)
     {
         level = string.Empty;
-        if (!OpenProcessToken(processHandle, TokenQuery, out IntPtr tokenHandle))
+        if (!DragDropPermissionNativeMethods.OpenProcessToken(processHandle, TokenQuery, out IntPtr tokenHandle))
         {
             return false;
         }
 
         try
         {
-            _ = GetTokenInformation(tokenHandle, TokenInformationClass.TokenIntegrityLevel, IntPtr.Zero, 0, out int length);
+            _ = DragDropPermissionNativeMethods.GetTokenInformation(tokenHandle, DragDropPermissionNativeMethods.TokenInformationClass.TokenIntegrityLevel, IntPtr.Zero, 0, out int length);
             if (length <= 0)
             {
                 return false;
@@ -949,13 +1121,13 @@ public static class DragDropPermissionService
             IntPtr buffer = Marshal.AllocHGlobal(length);
             try
             {
-                if (!GetTokenInformation(tokenHandle, TokenInformationClass.TokenIntegrityLevel, buffer, length, out _))
+                if (!DragDropPermissionNativeMethods.GetTokenInformation(tokenHandle, DragDropPermissionNativeMethods.TokenInformationClass.TokenIntegrityLevel, buffer, length, out _))
                 {
                     return false;
                 }
 
-                var label = Marshal.PtrToStructure<TokenMandatoryLabel>(buffer);
-                IntPtr subAuthorityCount = GetSidSubAuthorityCount(label.Label.Sid);
+                var label = Marshal.PtrToStructure<DragDropPermissionNativeMethods.TokenMandatoryLabel>(buffer);
+                IntPtr subAuthorityCount = DragDropPermissionNativeMethods.GetSidSubAuthorityCount(label.Label.Sid);
                 if (subAuthorityCount == IntPtr.Zero)
                 {
                     return false;
@@ -967,7 +1139,7 @@ public static class DragDropPermissionService
                     return false;
                 }
 
-                IntPtr integrityRidPointer = GetSidSubAuthority(label.Label.Sid, (uint)(count - 1));
+                IntPtr integrityRidPointer = DragDropPermissionNativeMethods.GetSidSubAuthority(label.Label.Sid, (uint)(count - 1));
                 int integrityRid = Marshal.ReadInt32(integrityRidPointer);
                 level = FormatIntegrityLevel(integrityRid);
                 return true;
@@ -979,7 +1151,7 @@ public static class DragDropPermissionService
         }
         finally
         {
-            CloseHandle(tokenHandle);
+            DragDropPermissionNativeMethods.CloseHandle(tokenHandle);
         }
     }
 
@@ -1017,7 +1189,6 @@ public static class DragDropPermissionService
         string? Error);
 
     private sealed record AppCompatEntry(
-        RegistryKey Root,
         string RootName,
         string ExePath,
         string Value);
@@ -1032,63 +1203,8 @@ public static class DragDropPermissionService
         string Arguments,
         bool EnsureExists);
 
-    private enum TokenInformationClass
-    {
-        TokenElevation = 20,
-        TokenIntegrityLevel = 25
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenElevation
-    {
-        public int TokenIsElevated;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenMandatoryLabel
-    {
-        public SidAndAttributes Label;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SidAndAttributes
-    {
-        public IntPtr Sid;
-        public int Attributes;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct StartupInfo
-    {
-        public int cb;
-        public string? lpReserved;
-        public string? lpDesktop;
-        public string? lpTitle;
-        public int dwX;
-        public int dwY;
-        public int dwXSize;
-        public int dwYSize;
-        public int dwXCountChars;
-        public int dwYCountChars;
-        public int dwFillAttribute;
-        public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
-        public IntPtr lpAttributeList;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ProcessInformation
-    {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public int dwProcessId;
-        public int dwThreadId;
-    }
+    // Token-integrity and relaunch entry points with their marshaling
+    // structures live in DeskBox.Platform.DragDropPermissionNativeMethods.
 
 #if !DESKBOX_NATIVE_AOT
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -1148,75 +1264,4 @@ public static class DragDropPermissionService
     private const uint ProcessCreateProcess = 0x0080;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const int ProcThreadAttributeParentProcess = 0x00020000;
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetTokenInformation(
-        IntPtr tokenHandle,
-        TokenInformationClass tokenInformationClass,
-        IntPtr tokenInformation,
-        int tokenInformationLength,
-        out int returnLength);
-
-    [DllImport("advapi32.dll")]
-    private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint subAuthority);
-
-    [DllImport("advapi32.dll")]
-    private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetShellWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool InitializeProcThreadAttributeList(
-        IntPtr lpAttributeList,
-        int dwAttributeCount,
-        int dwFlags,
-        ref int lpSize);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UpdateProcThreadAttribute(
-        IntPtr lpAttributeList,
-        uint dwFlags,
-        IntPtr attribute,
-        ref IntPtr lpValue,
-        IntPtr cbSize,
-        IntPtr lpPreviousValue,
-        IntPtr lpReturnSize);
-
-    [DllImport("kernel32.dll")]
-    private static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcess(
-        string? lpApplicationName,
-        string lpCommandLine,
-        IntPtr lpProcessAttributes,
-        IntPtr lpThreadAttributes,
-        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandles,
-        uint dwCreationFlags,
-        IntPtr lpEnvironment,
-        string? lpCurrentDirectory,
-        ref StartupInfo lpStartupInfo,
-        out ProcessInformation lpProcessInformation);
 }

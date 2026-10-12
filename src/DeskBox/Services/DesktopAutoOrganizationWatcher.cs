@@ -1,12 +1,12 @@
-using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using Microsoft.Win32.SafeHandles;
 using DeskBox.Models;
+using DeskBox.Platform;
 
 namespace DeskBox.Services;
 
 public sealed class DesktopAutoOrganizationWatcher : IDisposable
 {
-    private static readonly TimeSpan SettleDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan StabilityProbeDelay = TimeSpan.FromMilliseconds(800);
     private static readonly TimeSpan ActivityBurstWindow = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ActivityQuietDelay = TimeSpan.FromSeconds(4);
@@ -32,6 +32,8 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
     private readonly FileSystemWatcher _watcher;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
+    private readonly ConcurrentDictionary<string, byte> _targetUnavailableNotifiedWidgetIds =
+        new(StringComparer.Ordinal);
     private CancellationTokenSource _featureCts = new();
     private Task? _retryPump;
     private bool _lastEnabled;
@@ -40,6 +42,7 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
     private int _watcherRecoveryAttempts;
 
     public event Action<DesktopAutoOrganizationCompleted>? ItemOrganized;
+    public event Action<DesktopOrganizationTargetUnavailableSummary>? AutoOrganizationTargetUnavailable;
 
     public DesktopAutoOrganizationWatcher(
         SettingsService settingsService,
@@ -158,6 +161,10 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
         _featureCts.Dispose();
         _featureCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
         Interlocked.Exchange(ref _watcherRecoveryAttempts, 0);
+        // A fresh enable cycle gets a fresh unavailability episode: a target
+        // that is still unreachable after a toggle round-trip must warn
+        // again instead of staying muted by the previous cycle's notice.
+        _targetUnavailableNotifiedWidgetIds.Clear();
     }
 
     private void DisableFeature()
@@ -482,7 +489,17 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
             return;
         }
 
-        StartProcessing(_states.BeginPending(fullPath, preserveRetryAttempts));
+        DesktopAutoOrganizationWorkItem workItem =
+            _states.BeginPending(fullPath, preserveRetryAttempts);
+        // The configured wait replaces the old settle grace, so it must not
+        // consume the transient-failure retry budget.
+        if (_states.MarkDeferred(
+                workItem,
+                _utcNow().Add(DesktopAutoOrganizationPolicy.GetDelay(_settingsService.Settings)),
+                countAttempt: false))
+        {
+            SignalRetryPump();
+        }
     }
 
     private void StartProcessing(DesktopAutoOrganizationWorkItem workItem)
@@ -504,9 +521,11 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
         CancellationToken cancellationToken)
     {
         bool moveSucceeded = false;
+        // Declared outside the try so the recoverable-unavailability catch
+        // can report which target the item was being organized into.
+        WidgetConfig? target = null;
         try
         {
-            await _delayAsync(SettleDelay, cancellationToken);
             await WaitForDirectoryQuietAsync(workItem.Path, cancellationToken);
             if (_disposed ||
                 !_settingsService.Settings.DesktopAutoOrganizationEnabled ||
@@ -592,7 +611,7 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
                 return;
             }
 
-            WidgetConfig? target = _settingsService.Settings.Widgets.FirstOrDefault(widget =>
+            target = _settingsService.Settings.Widgets.FirstOrDefault(widget =>
                 string.Equals(widget.Id, rule.TargetWidgetId, StringComparison.Ordinal));
             if (target is null)
             {
@@ -647,13 +666,14 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
                     return;
                 }
 
-                OrganizationHistoryEntry history = await _organizerService.OrganizeDropAsync(
+                OrganizerOperationResult operation = await _organizerService.OrganizeDropAsync(
                     target,
                     target.Name,
                     [workItem.Path],
                     move: true,
                     useShellProgress: false);
                 moveSucceeded = true;
+                _targetUnavailableNotifiedWidgetIds.TryRemove(target.Id, out _);
 
                 // Moving the source is the transaction boundary. Mark it before
                 // best-effort UI work so refresh/notification failures never retry it.
@@ -674,7 +694,7 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
                 try
                 {
                     ItemOrganized?.Invoke(new DesktopAutoOrganizationCompleted(
-                        history.Id,
+                        operation.History.Id,
                         Path.GetFileName(workItem.Path),
                         target.Id,
                         target.Name));
@@ -718,6 +738,17 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
             {
                 MarkMissing(workItem);
             }
+
+            // The recoverable skip must stay visible: warn once per target
+            // per unavailability episode (re-armed by a later successful
+            // move or a fresh enable cycle) instead of once per deferred
+            // item, so a dead drive with steady traffic does not spam.
+            if (ex is OrganizerService.MappedFolderUnavailableException mapped &&
+                target is not null &&
+                _targetUnavailableNotifiedWidgetIds.TryAdd(target.Id, 0))
+            {
+                RaiseTargetUnavailable(target.Name, mapped.Path);
+            }
         }
         catch (UnauthorizedAccessException ex) when (!moveSucceeded)
         {
@@ -751,6 +782,22 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
             {
                 Defer(workItem, DesktopAutoOrganizationRetryKind.Finite);
             }
+        }
+    }
+
+    private void RaiseTargetUnavailable(string widgetName, string targetPath)
+    {
+        try
+        {
+            AutoOrganizationTargetUnavailable?.Invoke(
+                new DesktopOrganizationTargetUnavailableSummary(
+                    new[] { widgetName },
+                    new[] { targetPath }));
+        }
+        catch (Exception ex)
+        {
+            App.Log(
+                $"[DesktopAutoOrganization] Target-unavailable notification failed: {ex}");
         }
     }
 
@@ -879,7 +926,9 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
 
     private static FileIdentity? TryGetFileIdentity(SafeFileHandle handle)
     {
-        return GetFileInformationByHandle(handle, out ByHandleFileInformation information)
+        return Kernel32NativeMethods.GetFileInformationByHandle(
+            handle,
+            out Kernel32NativeMethods.ByHandleFileInformation information)
             ? new FileIdentity(
                 information.VolumeSerialNumber,
                 ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow)
@@ -1067,26 +1116,6 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
         uint VolumeSerialNumber,
         ulong FileIndex);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ByHandleFileInformation
-    {
-        public uint FileAttributes;
-        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(
-        SafeFileHandle hFile,
-        out ByHandleFileInformation fileInformation);
 }
 
 public sealed record DesktopAutoOrganizationCompleted(

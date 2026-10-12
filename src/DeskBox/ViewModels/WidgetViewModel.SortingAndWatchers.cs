@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -51,37 +52,6 @@ public partial class WidgetViewModel
         NormalizeSortOrder();
         _settingsService.UpdateWidget(Config, notifySubscribers: false);
         OnPropertyChanged(nameof(SortModeLabel));
-    }
-
-    /// <summary>
-    /// Moves an item to a new position within the Items collection.
-    /// Only effective when SortMode is Manual; otherwise the call is ignored.
-    /// </summary>
-    public bool TryReorderItem(WidgetItem item, int targetIndex)
-    {
-        if (Config.SortMode != WidgetSortMode.Manual || !IsAtMappedRoot)
-        {
-            return false;
-        }
-
-        int currentIndex = Items.IndexOf(item);
-        if (currentIndex < 0 || currentIndex == targetIndex)
-        {
-            return false;
-        }
-
-        // Clamp targetIndex to valid range.
-        targetIndex = Math.Clamp(targetIndex, 0, Items.Count - 1);
-        if (currentIndex == targetIndex)
-        {
-            return false;
-        }
-
-        Items.Move(currentIndex, targetIndex);
-        NormalizeSortOrder();
-        SyncConfigItemsOrder();
-        _settingsService.UpdateWidget(Config, notifySubscribers: false);
-        return true;
     }
 
     /// <summary>
@@ -306,23 +276,40 @@ public partial class WidgetViewModel
 
             if (ShouldUseFullReload(changeBatch, CurrentFolderPath))
             {
+                // A full reload mid-import would re-sync, re-sort and
+                // re-hydrate the whole list, throwing away the batching the
+                // open scope just bought — and an import's event storm can
+                // still trip the watcher's buffered-change cap or its
+                // overflow/error channels. Defer one authoritative refresh to
+                // the batch finalization instead of fighting the import for
+                // the list.
+                if (_itemMutationBatchDepth > 0)
+                {
+                    _pendingFolderRefreshAfterBatch = true;
+                    MarkItemMutationBatchDirty();
+                    return;
+                }
+
                 await LoadFolderContentsAsync(CurrentFolderPath);
                 return;
             }
 
-            FolderPathSnapshot snapshot =
-                await FileService.CaptureDirectChildSnapshotAsync(changeBatch.WatchedPath);
-            if (!FolderSnapshotStatusPolicy.IsSuccessful(snapshot.Status))
+            // A large batch with a KNOWN change set no longer detours through
+            // a full reload: coalesce the shell/antivirus event multiplication
+            // to one change per path, then apply the batch inside a single
+            // mutation scope so the whole batch pays one sort-order
+            // normalization, one manual-order persistence, one hydration start
+            // (which itself only processes items still missing metadata) and
+            // one render reconcile - cost proportional to the batch, not the
+            // folder. Only the state-loss signals in ShouldUseFullReload still
+            // reload; the watcher's buffered-change cap routes true event
+            // storms there.
+            using (EnterItemMutationScope())
             {
-                App.Log(
-                    $"[FolderRefresh] Incremental root unavailable; retaining snapshot: " +
-                    $"'{changeBatch.WatchedPath}'");
-                return;
-            }
-
-            foreach (var change in changeBatch.Changes)
-            {
-                await ApplyFolderChangeAsync(change, snapshot);
+                foreach (FolderChange change in CoalesceFolderChanges(changeBatch.Changes))
+                {
+                    await ApplyFolderChangeAsync(change);
+                }
             }
         }
         catch (Exception ex)
@@ -349,6 +336,37 @@ public partial class WidgetViewModel
     }
 
     /// <summary>
+    /// One authoritative refresh deferred out of an open batch mutation
+    /// scope: the watcher asked for a full reload while an import was
+    /// post-processing. Runs through the folder refresh gate so it cannot
+    /// interleave a scheduled incremental pass.
+    /// </summary>
+    private async Task RunDeferredFolderRefreshAsync()
+    {
+        try
+        {
+            await _folderRefreshGate.WaitAsync();
+            try
+            {
+                if (!_isDisposed && !string.IsNullOrEmpty(CurrentFolderPath))
+                {
+                    await LoadFolderContentsAsync(CurrentFolderPath);
+                }
+            }
+            finally
+            {
+                _folderRefreshGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            App.Log(
+                $"[FolderRefresh] Deferred post-batch refresh failed for " +
+                $"'{CurrentFolderPath}': {ex}");
+        }
+    }
+
+    /// <summary>
     /// Handles a shell icon change for a direct child folder (e.g. after a
     /// tool like Folder Painter rewrites its desktop.ini).  Clears the cached
     /// icon and re-hydrates just that item.
@@ -371,9 +389,21 @@ public partial class WidgetViewModel
         StartItemHydration();
     }
 
-    private bool ShouldUseFullReload(FolderChangeBatch changeBatch, string mappedFolderPath)
+    /// <summary>
+    /// Decides whether a watcher batch must pay a full reload. Only
+    /// state-loss signals qualify: the watcher's overflow/error/query
+    /// channels (ReadDirectoryChangesW provides just a blanket notification
+    /// once its buffer overflows, so <c>RequiresFullReload</c> batches cannot
+    /// trust their change list), an empty change list, the combined desktop
+    /// roots (the incremental path applies single-root changes), and batches
+    /// from a folder this widget no longer displays. Batch SIZE is
+    /// deliberately not a criterion: a large batch with a known change set
+    /// runs as a coalesced incremental pass inside one mutation scope, so a
+    /// multi-folder drag storm no longer triggers reload-per-batch.
+    /// </summary>
+    internal static bool ShouldUseFullReload(FolderChangeBatch changeBatch, string mappedFolderPath)
     {
-        if (changeBatch.RequiresFullReload || changeBatch.Changes.Count == 0 || changeBatch.Changes.Count > IncrementalRefreshBatchThreshold)
+        if (changeBatch.RequiresFullReload || changeBatch.Changes.Count == 0)
         {
             return true;
         }
@@ -421,9 +451,56 @@ public partial class WidgetViewModel
         return changeBatch.Generation == watcher.Generation;
     }
 
-    private async Task ApplyFolderChangeAsync(
-        FolderChange change,
-        FolderPathSnapshot snapshot)
+    /// <summary>
+    /// Collapses a watcher batch to its last event per path, keeping the
+    /// surviving events in their original batch order. Shell copies and
+    /// antivirus scans report several events per path (Created plus
+    /// LastWrite/Size/Attributes Changed); classification re-reads current
+    /// disk state, so only the newest signal per path carries information
+    /// and every older duplicate would just repeat a classification and an
+    /// upsert. Renamed events are exempt: a rename carries its own old-path
+    /// removal, and a later event against the renamed path (the copy engine
+    /// writing the moved file) must not swallow that removal.
+    /// </summary>
+    internal static IReadOnlyList<FolderChange> CoalesceFolderChanges(
+        IReadOnlyList<FolderChange> changes)
+    {
+        if (changes.Count <= 1)
+        {
+            return changes;
+        }
+
+        var lastEventIndexByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < changes.Count; index++)
+        {
+            FolderChange change = changes[index];
+            if (change.ChangeType != WatcherChangeTypes.Renamed)
+            {
+                lastEventIndexByPath[change.FullPath] = index;
+            }
+        }
+
+        if (lastEventIndexByPath.Count == changes.Count)
+        {
+            // No renames and every path distinct - nothing to collapse.
+            return changes;
+        }
+
+        var coalesced = new List<FolderChange>(changes.Count);
+        for (int index = 0; index < changes.Count; index++)
+        {
+            FolderChange change = changes[index];
+            if (change.ChangeType == WatcherChangeTypes.Renamed ||
+                lastEventIndexByPath[change.FullPath] == index)
+            {
+                coalesced.Add(change);
+            }
+        }
+
+        return coalesced;
+    }
+
+    private async Task ApplyFolderChangeAsync(FolderChange change)
     {
         if (change.ChangeType == WatcherChangeTypes.Renamed && !string.IsNullOrWhiteSpace(change.OldFullPath))
         {
@@ -431,9 +508,9 @@ public partial class WidgetViewModel
                 ? FindItemIndexByPath(change.OldFullPath)
                 : -1;
             FolderEntryRefreshStatus oldState =
-                FileService.ClassifyDirectChild(snapshot, change.OldFullPath);
+                await FileService.ClassifyDirectChildAsync(change.OldFullPath);
             FolderEntryRefreshStatus newState =
-                FileService.ClassifyDirectChild(snapshot, change.FullPath);
+                await FileService.ClassifyDirectChildAsync(change.FullPath);
             if (ShouldRemoveExistingItem(WatcherChangeTypes.Renamed, oldState))
             {
                 if (newState == FolderEntryRefreshStatus.Available)
@@ -462,7 +539,7 @@ public partial class WidgetViewModel
         }
 
         FolderEntryRefreshStatus state =
-            FileService.ClassifyDirectChild(snapshot, change.FullPath);
+            await FileService.ClassifyDirectChildAsync(change.FullPath);
         if (ShouldRemoveExistingItem(change.ChangeType, state))
         {
             RemoveItemByPath(change.FullPath);
@@ -520,7 +597,7 @@ public partial class WidgetViewModel
             _showImageFilesAsIcons,
             resetTransientFailures: true);
 
-        int existingIndex = FindItemIndexByPath(path);
+        int existingIndex = FindItemIndexForManagedMutation(path);
         if (Config.SortMode == WidgetSortMode.Manual && existingIndex >= 0)
         {
             AssignAddedAt(item);
@@ -552,9 +629,8 @@ public partial class WidgetViewModel
                 Items[existingIndex] = item;
             }
 
-            NormalizeSortOrder();
-            PersistManualOrderSnapshotIfChanged();
-            StartItemHydration();
+            TrackManagedItemByPath(path, item);
+            FinishItemUpsert();
             return true;
         }
 
@@ -570,15 +646,33 @@ public partial class WidgetViewModel
             : GetSortedInsertIndex(item);
         item.SortOrder = insertIndex;
         Items.Insert(insertIndex, item);
+        TrackManagedItemByPath(path, item);
+        FinishItemUpsert();
+        return true;
+    }
+
+    /// <summary>
+    /// Per-upsert derived work: sort-order normalization, manual-order
+    /// persistence, metadata hydration. A batch mutation scope defers these
+    /// to its single end-of-batch finalization, so a 2000-file import runs
+    /// them once instead of once per file.
+    /// </summary>
+    private void FinishItemUpsert()
+    {
+        if (_itemMutationBatchDepth > 0)
+        {
+            MarkItemMutationBatchDirty();
+            return;
+        }
+
         NormalizeSortOrder();
         PersistManualOrderSnapshotIfChanged();
         StartItemHydration();
-        return true;
     }
 
     private void RemoveItemByPath(string path, bool persistManualOrder = true)
     {
-        int index = FindItemIndexByPath(path);
+        int index = FindItemIndexForManagedMutation(path);
         if (index < 0)
         {
             return;
@@ -590,7 +684,14 @@ public partial class WidgetViewModel
             _showImageFilesAsIcons,
             resetTransientFailures: true);
         Items.RemoveAt(index);
+        UntrackManagedItemByPath(path);
         RemoveFileAddedAt(path);
+        if (_itemMutationBatchDepth > 0)
+        {
+            MarkItemMutationBatchDirty();
+            return;
+        }
+
         NormalizeSortOrder();
         if (persistManualOrder)
         {
@@ -619,15 +720,44 @@ public partial class WidgetViewModel
             return Items.Count;
         }
 
-        for (int index = 0; index < Items.Count; index++)
+        // Items is kept sorted under the active sort mode, so the linear
+        // first-strictly-greater scan is an upper-bound search: a 2000-file
+        // import pays ~11 comparisons per insert instead of ~1000.
+        return BinarySearchSortedInsertIndex(
+            Items.Count,
+            index => Items[index],
+            candidate,
+            CompareItems);
+    }
+
+    /// <summary>
+    /// Upper-bound insert search shared with behavior tests: the first index
+    /// whose item compares strictly greater than the candidate (equal keys
+    /// land after the equal run), mirroring the linear scan it replaced.
+    /// Requires the sequence to be sorted under the same comparison.
+    /// </summary>
+    internal static int BinarySearchSortedInsertIndex(
+        int count,
+        Func<int, WidgetItem> itemAt,
+        WidgetItem candidate,
+        Comparison<WidgetItem> compare)
+    {
+        int low = 0;
+        int high = count;
+        while (low < high)
         {
-            if (CompareItems(candidate, Items[index]) < 0)
+            int middle = low + ((high - low) / 2);
+            if (compare(candidate, itemAt(middle)) < 0)
             {
-                return index;
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
             }
         }
 
-        return Items.Count;
+        return low;
     }
 
     private void NormalizeSortOrder()

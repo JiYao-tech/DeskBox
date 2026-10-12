@@ -1,4 +1,4 @@
-namespace DeskBox.Tests;
+﻿namespace DeskBox.Tests;
 
 public sealed class AotStage5B4B1ContractTests
 {
@@ -21,9 +21,6 @@ public sealed class AotStage5B4B1ContractTests
         "AppearanceDensitySettings",
         "AppearanceWindowSettings",
         "AppearanceAnimationSettings",
-        "CapsuleBehaviorSettings",
-        "CapsuleArrangementSettings",
-        "CapsuleAnimationSettings",
         "CapsuleOverridesSettings",
         "BackupRestoreSettings",
         "DataHealthSettings",
@@ -82,7 +79,7 @@ public sealed class AotStage5B4B1ContractTests
     {
         string source = ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.AotDeepSmoke.cs");
 
-        Assert.Contains("CapsuleBehaviorSettings", source, StringComparison.Ordinal);
+        Assert.Contains("CapsuleOverridesSettings", source, StringComparison.Ordinal);
         Assert.Contains("CapsuleMode", source, StringComparison.Ordinal);
         Assert.Contains("BreadcrumbItems", source, StringComparison.Ordinal);
         Assert.Contains("NavigateFromSettingsBreadcrumbItem", source, StringComparison.Ordinal);
@@ -104,9 +101,9 @@ public sealed class AotStage5B4B1ContractTests
         string ruleEditor = ReadRepositoryFile("src/DeskBox/ViewModels/FileStackCustomRuleEditor.cs");
         string settingsOption = ReadRepositoryFile("src/DeskBox/Models/SettingsOption.cs");
         string capsuleOptions = ReadRepositoryFile(
-            "src/DeskBox/ViewModels/SettingsViewModel.CapsuleOptions.cs");
+            "src/DeskBox/Models/CapsuleOverrideSettingsItem.cs");
         string groupNavigation = ReadRepositoryFile(
-            "src/DeskBox/ViewModels/SettingsViewModel.GroupNavigation.cs");
+            "src/DeskBox/Models/WidgetGroupSettingsItems.cs");
         string weatherData = ReadRepositoryFile("src/DeskBox/Models/WeatherData.cs");
         string fileWidgetXaml = ReadRepositoryFile(
             "src/DeskBox/Views/SettingsSections/FileWidgetSettingsSection.xaml");
@@ -117,7 +114,7 @@ public sealed class AotStage5B4B1ContractTests
         string selectionOptions = ReadRepositoryFile(
             "src/DeskBox/ViewModels/SettingsViewModel.SelectionOptions.cs");
         string weatherOptions = ReadRepositoryFile(
-            "src/DeskBox/ViewModels/SettingsViewModel.WeatherOptions.cs");
+            "src/DeskBox/Features/Weather/WeatherSettingsViewModel.cs");
         string hotkeyAndAppearance = ReadRepositoryFile(
             "src/DeskBox/Views/SettingsWindow.HotkeyAndAppearance.cs");
         string xaml = ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.xaml");
@@ -156,45 +153,81 @@ public sealed class AotStage5B4B1ContractTests
             weatherData,
             StringComparison.Ordinal);
         Assert.Contains(
-            "IsOn=\"{x:Bind ViewModel.FileStacksEnabled, Mode=TwoWay}\"",
+            "IsOn=\"{x:Bind FileStack.StacksEnabled, Mode=TwoWay}\"",
             fileWidgetXaml,
             StringComparison.Ordinal);
         Assert.Contains(
-            "ItemsSource=\"{x:Bind ViewModel.AvailableFileWidgetFolderOpenBehaviorOptionItems, Mode=OneWay}\"",
+            "ItemsSource=\"{x:Bind FeatureWidgets.AvailableFolderOpenBehaviorOptionItems, Mode=OneWay}\"",
             fileWidgetXaml,
             StringComparison.Ordinal);
-        Assert.Contains("AvailableFileStackPopoverLayoutOptions", fileStackOptions, StringComparison.Ordinal);
+        string fileStackEditor = ReadRepositoryFile(
+            "src/DeskBox/Features/FileStack/FileStackSettingsViewModel.cs");
+        Assert.Contains("AvailablePopoverLayoutOptions", fileStackEditor, StringComparison.Ordinal);
         Assert.Contains(
-            "AvailableFileWidgetFolderOpenBehaviorOptions.Cast<object>().ToArray()",
-            featureOptions,
-            StringComparison.Ordinal);
-        Assert.Contains("nameof(AvailableFileWidgetFolderOpenBehaviorOptionItems)", selectionOptions, StringComparison.Ordinal);
-        Assert.Contains(
-            "nameof(AvailableFileWidgetFolderOpenBehaviorOptionItems)",
-            selectionOptions,
+            "AvailableFolderOpenBehaviorOptions.Cast<object>().ToArray()",
+            ReadRepositoryFile("src/DeskBox/Features/FeatureWidgets/FeatureWidgetsSettingsViewModel.cs"),
             StringComparison.Ordinal);
         Assert.Contains(
-            "ObservableCollection<WeatherCitySearchResult> WeatherCitySuggestions",
+            "controls:SettingsComboBox.Value=\"{x:Bind FeatureWidgets.FolderOpenBehavior, Mode=TwoWay}\"",
+            fileWidgetXaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "_citySuggestions.Cast<object>().ToArray()",
             weatherOptions,
             StringComparison.Ordinal);
         Assert.Contains(
-            "WeatherCitySuggestions.Cast<object>().ToArray()",
+            "SelectCity(_citySuggestions[0])",
             weatherOptions,
             StringComparison.Ordinal);
-        Assert.Contains("RefreshWeatherCitySuggestionItems()", weatherOptions, StringComparison.Ordinal);
-        Assert.Contains("WeatherCitySuggestions[0]", hotkeyAndAppearance, StringComparison.Ordinal);
+        Assert.Contains("_weatherSettingsViewModel.TrySelectFirstCitySuggestion()", hotkeyAndAppearance, StringComparison.Ordinal);
         Assert.Contains(
-            "ItemsSource=\"{Binding WeatherCitySuggestionItems}\"",
+            "ItemsSource=\"{Binding CitySuggestionItems}\"",
+            xaml,
+            StringComparison.Ordinal);
+        // Batch 49: the backup family (local/cloud/compat-diagnostics
+        // sections) binds through the backup editor; the remote snapshot
+        // projection keeps the code-behind object[] snapshot path.
+        string cloudBackup = ReadRepositoryFile(
+            "src/DeskBox/Views/SettingsWindow.CloudBackup.cs");
+        Assert.Contains(
+            "RemoteSnapshotItems.Cast<object>().ToArray()",
+            cloudBackup,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Text=\"{Binding LocalDirectoryDisplayText, Mode=OneWay}\"",
             xaml,
             StringComparison.Ordinal);
         Assert.Contains(
-            "ItemsSource=\"{x:Bind FileStackCustomRules, Mode=OneWay}\"",
+            "section.DataContext = _backupSettingsViewModel;",
+            ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.DeferredSections.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ItemsSource=\"{x:Bind CustomRules, Mode=OneWay}\"",
             xaml,
             StringComparison.Ordinal);
-        Assert.Equal(329, CountOccurrences(bindableViewModel, "nameof("));
-        Assert.Contains("nameof(ImmediateHiddenWorkingSetTrimEnabled)", bindableViewModel, StringComparison.Ordinal);
+        Assert.Equal(33, CountOccurrences(bindableViewModel, "nameof("));
+        Assert.Contains("nameof(AvailableAutoStartModeOptions)", bindableViewModel, StringComparison.Ordinal);
+        // Batch 50: the performance section (and the General section's
+        // inline preset combo + attachment-storage combo) bind through the
+        // performance / feature-widgets editors; the shell bridge keeps only
+        // the General host-lifeline and About update-card surfaces.
+        Assert.DoesNotContain("nameof(SelectedPerformanceMode)", bindableViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("nameof(IdleWorkingSetTrimEnabled)", bindableViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("nameof(SelectedAttachmentStorageMode)", bindableViewModel, StringComparison.Ordinal);
+        Assert.Contains(
+            "PerformanceModeInlineComboBox.DataContext = _performanceSettingsViewModel;",
+            ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.xaml.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AttachmentStorageModeComboBox.DataContext = _featureWidgetsSettingsViewModel;",
+            ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.xaml.cs"),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "section.DataContext = _performanceSettingsViewModel;",
+            ReadRepositoryFile("src/DeskBox/Views/SettingsWindow.DeferredSections.cs"),
+            StringComparison.Ordinal);
         Assert.DoesNotContain("nameof(WidgetCapsuleModeEnabled)", bindableViewModel, StringComparison.Ordinal);
-        Assert.Contains("nameof(SelectedWidgetCapsuleBarPlacement)", bindableViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("nameof(SelectedWidgetCapsuleBarPlacement)", bindableViewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("nameof(ResetAllCapsuleOverridesCommand)", bindableViewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("nameof(ResetCapsuleWidthOverridesCommand)", bindableViewModel, StringComparison.Ordinal);
         Assert.Contains(
@@ -301,8 +334,8 @@ public sealed class AotStage5B4B1ContractTests
         string baseline = ReadRepositoryFile("tests/DeskBox.Tests/JsonSerializationBaselineContractTests.cs");
         string source = ReadRepositoryFile("src/DeskBox/App.AotManagedUiSmoke.cs");
 
-        Assert.Contains("Assert.Equal(29, actual.Count);", baseline, StringComparison.Ordinal);
-        Assert.Contains("Assert.Equal(67, actual.Values.Sum());", baseline, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(39, actual.Count);", baseline, StringComparison.Ordinal);
+        Assert.Contains("Assert.Equal(93, actual.Values.Sum());", baseline, StringComparison.Ordinal);
         Assert.Contains("\"src/DeskBox/App.AotManagedUiSmoke.cs\"", baseline, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(source, "JsonSerializer.Serialize("));
     }
@@ -314,11 +347,28 @@ public sealed class AotStage5B4B1ContractTests
         string launcher = ReadRepositoryFile("scripts/start-aot-preview.ps1");
         string project = ReadRepositoryFile("src/DeskBox/DeskBox.csproj");
 
-        Assert.Contains("$auditProfileVersion = 63", audit, StringComparison.Ordinal);
-        Assert.Contains("schemaVersion = 55", audit, StringComparison.Ordinal);
+        // Pin the semantics, not the literal: the launcher rejects any audit
+        // summary whose profile/schema version differs from what it requires,
+        // so the two scripts must declare the same numbers. Extracting both
+        // and comparing them catches a bump that lands on only one side —
+        // pinning each literal separately cannot.
+        var auditProfileMatch = System.Text.RegularExpressions.Regex.Match(
+            audit, @"\$auditProfileVersion\s*=\s*(\d+)");
+        var requiredProfileMatch = System.Text.RegularExpressions.Regex.Match(
+            launcher, @"\$RequiredAuditProfileVersion\s*=\s*(\d+)");
+        Assert.True(auditProfileMatch.Success, "audit script must declare $auditProfileVersion");
+        Assert.True(requiredProfileMatch.Success, "launcher must declare $RequiredAuditProfileVersion");
+        Assert.Equal(auditProfileMatch.Groups[1].Value, requiredProfileMatch.Groups[1].Value);
+
+        var auditSchemaMatch = System.Text.RegularExpressions.Regex.Match(
+            audit, @"(?m)^\s*schemaVersion\s*=\s*(\d+)\s*$");
+        var requiredSchemaMatch = System.Text.RegularExpressions.Regex.Match(
+            launcher, @"\$RequiredSummarySchemaVersion\s*=\s*(\d+)");
+        Assert.True(auditSchemaMatch.Success, "audit script must declare a schemaVersion");
+        Assert.True(requiredSchemaMatch.Success, "launcher must declare $RequiredSummarySchemaVersion");
+        Assert.Equal(auditSchemaMatch.Groups[1].Value, requiredSchemaMatch.Groups[1].Value);
+
         Assert.Contains("stage5B4B1", audit, StringComparison.Ordinal);
-        Assert.Contains("$RequiredAuditProfileVersion = 63", launcher, StringComparison.Ordinal);
-        Assert.Contains("$RequiredSummarySchemaVersion = 55", launcher, StringComparison.Ordinal);
         Assert.Contains("stage 5B-4C3B2B1", project, StringComparison.Ordinal);
         Assert.Contains("deep settings", project, StringComparison.OrdinalIgnoreCase);
     }
@@ -338,15 +388,14 @@ public sealed class AotStage5B4B1ContractTests
         Assert.Contains("stage5B4B1RequiredFileWidgetProjectionPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1RequiredWeatherProjectionPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1RequiredCommandXamlPatterns", audit, StringComparison.Ordinal);
-        Assert.Contains("stage5B4B1RequiredDeferredSectionPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1RequiredCapsuleCommandXamlPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1RequiredCapsuleCodeBehindPatterns", audit, StringComparison.Ordinal);
-        Assert.Contains("stage5B4B1ExpectedBindableViewModelPropertyCount = 329", audit, StringComparison.Ordinal);
+        Assert.Contains("stage5B4B1ExpectedBindableViewModelPropertyCount = 34", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1RequiredSmokeScriptPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1MissingRoutePatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1UnsafeMutationPatterns", audit, StringComparison.Ordinal);
         Assert.Contains("stage5B4B1SourceWarningMessages", audit, StringComparison.Ordinal);
-        Assert.Contains("stage5B4B1ExpectedWmc1510Count = 867", audit, StringComparison.Ordinal);
+        Assert.Contains("stage5B4B1ExpectedWmc1510Count = 875", audit, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string value, string token)

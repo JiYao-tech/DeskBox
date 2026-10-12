@@ -1,6 +1,6 @@
 using DeskBox.Helpers;
+using DeskBox.Platform;
 using Microsoft.UI.Dispatching;
-using System.Runtime.InteropServices;
 
 namespace DeskBox.Services;
 
@@ -32,17 +32,29 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
     private bool _isDisposed;
     private bool _isSubclassInstalled;
     private bool _sessionNotificationRegistered;
+    private IntPtr _powerNotifyHandle;
     private string _pendingReasons = string.Empty;
+
+    /// <summary>
+    /// Optional gate-event sink (spec 5.6): receives "session-locked" /
+    /// "session-unlocked" / "display-power-off" / "display-power-on" so the
+    /// topology gate can park restores while the session is locked or the
+    /// screen is off. Separate from the recovery action on purpose — gate
+    /// events must never schedule a restore by themselves.
+    /// </summary>
+    private readonly Action<string>? _gateEventAction;
 
     public AppLifecycleRecoveryWatcher(
         IntPtr hWnd,
         DispatcherQueue dispatcherQueue,
         Action<string> recoveryAction,
-        Action<string>? endSessionAction = null)
+        Action<string>? endSessionAction = null,
+        Action<string>? gateEventAction = null)
     {
         _hWnd = hWnd;
         _recoveryAction = recoveryAction;
         _endSessionAction = endSessionAction;
+        _gateEventAction = gateEventAction;
         _subclassProc = WindowSubclassProc;
         _timer = dispatcherQueue.CreateTimer();
         _timer.Interval = RecoveryDelay;
@@ -62,7 +74,7 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
 
         try
         {
-            _sessionNotificationRegistered = WTSRegisterSessionNotification(
+            _sessionNotificationRegistered = Win32Helper.WTSRegisterSessionNotification(
                 _hWnd,
                 NotifyForThisSession);
         }
@@ -77,6 +89,19 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
         catch (Exception ex)
         {
             App.Log($"[Lifecycle] Session notification registration failed: {ex.Message}");
+        }
+
+        try
+        {
+            Guid displayStateGuid = Win32Helper.ConsoleDisplayStatePowerSetting;
+            _powerNotifyHandle = Win32Helper.RegisterPowerSettingNotification(
+                _hWnd,
+                ref displayStateGuid,
+                Win32Helper.DeviceNotifyWindowHandle);
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[Lifecycle] Power setting notification registration failed: {ex.Message}");
         }
 
         App.Log(
@@ -96,9 +121,17 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
             AppLifecycleRecoverySignalClassifier.ResolveRecoveryReason(
                 message,
                 wParam,
+                lParam,
                 s_taskbarCreatedMessage);
-        if (recoveryReason is not null)
+        if (recoveryReason == "display-power-off")
         {
+            // Screen-off is a gate signal only: topology churn while the
+            // display is off must not schedule a restore (spec 5.6).
+            RaiseGateEvent(recoveryReason);
+        }
+        else if (recoveryReason is not null)
+        {
+            RaiseGateEvent(recoveryReason == "display-power-on" ? recoveryReason : null);
             QueueRecovery(recoveryReason);
         }
         else if (message == WmQueryEndSession)
@@ -120,6 +153,7 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
                 sessionEvent == WtsSessionLogon ||
                 sessionEvent == WtsSessionRemoteConnect)
             {
+                RaiseGateEvent("session-unlocked");
                 QueueRecovery(sessionEvent == WtsSessionUnlock
                     ? "session-unlock"
                     : "session-reconnect");
@@ -128,6 +162,7 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
                      sessionEvent == WtsSessionLogoff ||
                      sessionEvent == WtsSessionRemoteDisconnect)
             {
+                RaiseGateEvent("session-locked");
                 App.Log("[Lifecycle] Session ended or locked; deferring external-state recovery.");
             }
         }
@@ -148,6 +183,23 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
         catch (Exception ex)
         {
             App.Log($"[Lifecycle] End-session callback failed: {ex.Message}");
+        }
+    }
+
+    private void RaiseGateEvent(string? eventName)
+    {
+        if (eventName is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _gateEventAction?.Invoke(eventName);
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[Lifecycle] Gate event '{eventName}' failed: {ex.Message}");
         }
     }
 
@@ -203,11 +255,25 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
         _timer.Stop();
         _timer.Tick -= RecoveryTimer_Tick;
 
+        if (_powerNotifyHandle != IntPtr.Zero)
+        {
+            try
+            {
+                Win32Helper.UnregisterPowerSettingNotification(_powerNotifyHandle);
+            }
+            catch
+            {
+                // Best effort during teardown; the window is going away.
+            }
+
+            _powerNotifyHandle = IntPtr.Zero;
+        }
+
         if (_sessionNotificationRegistered)
         {
             try
             {
-                WTSUnRegisterSessionNotification(_hWnd);
+                Win32Helper.WTSUnRegisterSessionNotification(_hWnd);
             }
             catch
             {
@@ -223,12 +289,4 @@ internal sealed class AppLifecycleRecoveryWatcher : IDisposable
             _isSubclassInstalled = false;
         }
     }
-
-    [DllImport("wtsapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WTSRegisterSessionNotification(IntPtr hWnd, uint flags);
-
-    [DllImport("wtsapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
 }

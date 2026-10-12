@@ -1,6 +1,7 @@
 using DeskBox.Contracts;
 using DeskBox.Helpers;
 using DeskBox.Models;
+using DeskBox.Platform;
 using DeskBox.Services;
 using DeskBox.ViewModels;
 using System.ComponentModel;
@@ -14,28 +15,21 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
+using Microsoft.Windows.Storage.Pickers;
 using Windows.Storage;
-using Windows.Storage.Pickers;
 using Windows.UI;
-using WinRT.Interop;
 
 namespace DeskBox.Controls.WidgetContents;
 
 /// <summary>
-/// Window-independent Quick Capture member. All top-level window, DWM,
+/// Window-independent Quick Capture leaf view. All top-level window, DWM,
 /// z-order, bounds, capsule, and group navigation behavior stays with the
-/// surface host; this control owns only Quick Capture data and interaction.
+/// surface host; this control owns only Quick Capture interaction state.
+/// The residency adapter (QuickCaptureWidgetContentAdapter) owns the view
+/// model and this leaf's lifetime.
 /// </summary>
 public sealed partial class QuickCaptureSurfaceContent :
     UserControl,
-    IWidgetContent,
-    IWidgetFeedbackSource,
-    IWidgetTransientStateContent,
-    IWidgetResponsiveLayoutContent,
-    IWidgetHostViewportContent,
-    IWidgetInteractiveResizeContent,
-    IWidgetAddActionContent,
-    IWidgetGroupContentCacheable,
     IDisposable
 {
     private const int DetailAutoSaveDelayMs = 600;
@@ -91,26 +85,20 @@ public sealed partial class QuickCaptureSurfaceContent :
     private bool _isWindowRevealCompleted;
 
     public QuickCaptureSurfaceContent(
-        WidgetConfig config,
-        QuickCaptureService quickCaptureService,
+        QuickCaptureWidgetViewModel viewModel,
         SettingsService settingsService,
         LocalizationService localizationService,
         DispatcherQueue dispatcherQueue)
     {
-        ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(quickCaptureService);
+        ArgumentNullException.ThrowIfNull(viewModel);
         ArgumentNullException.ThrowIfNull(settingsService);
         ArgumentNullException.ThrowIfNull(localizationService);
         ArgumentNullException.ThrowIfNull(dispatcherQueue);
 
         _localizationService = localizationService;
         _settingsService = settingsService;
-        ViewModel = new QuickCaptureWidgetViewModel(
-            config,
-            quickCaptureService,
-            settingsService,
-            localizationService,
-            dispatcherQueue);
+        ViewModel = viewModel;
+        WidgetConfig config = viewModel.Config;
 
         try
         {
@@ -154,19 +142,15 @@ public sealed partial class QuickCaptureSurfaceContent :
 
     public QuickCaptureWidgetViewModel ViewModel { get; }
 
-    public event EventHandler<WidgetFeedbackRequestedEventArgs>? FeedbackRequested;
+    internal event EventHandler<WidgetFeedbackRequestedEventArgs>? FeedbackRequested;
 
-    public WidgetConfig Config => ViewModel.Config;
+    internal WidgetConfig Config => ViewModel.Config;
 
-    public string WidgetId => Config.Id;
+    internal string WidgetId => Config.Id;
 
-    public WidgetKind WidgetKind => WidgetKind.QuickCapture;
+    internal bool IsReadyForReuse => _isInitialized && !_isDisposed;
 
-    public FrameworkElement View => this;
-
-    public bool IsReadyForReuse => _isInitialized && !_isDisposed;
-
-    public async Task InitializeAsync()
+    internal async Task InitializeContentAsync()
     {
         await ViewModel.InitializeAsync();
         _isInitialized = true;
@@ -178,9 +162,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public Task RefreshAsync() => ViewModel.RefreshItemsAsync();
-
-    public async Task AddFromTitleButtonAsync()
+    internal async Task AddFromTitleButtonAsync()
     {
         await OpenNewDetailAsync();
     }
@@ -207,7 +189,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         await OpenDetailAfterSavingAsync(item);
     }
 
-    public void ApplyAppearance()
+    internal void ApplyAppearance()
     {
         ViewModel.ApplyAppearancePreview();
         UpdateSelectedViewVisual();
@@ -215,7 +197,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         ApplyResponsiveLayout();
     }
 
-    public void OnActivated()
+    internal void OnActivated()
     {
         if (IsLoaded)
         {
@@ -223,13 +205,13 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public async void OnDeactivated()
+    internal async void OnDeactivated()
     {
         _lastFocusTarget = GetCurrentFocusTarget();
         await FlushPendingDetailSaveAsync();
     }
 
-    public async void OnWindowVisibilityChanged(bool visible)
+    internal async void OnWindowVisibilityChanged(bool visible)
     {
         _isWindowVisible = visible;
         if (!visible)
@@ -240,7 +222,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public void OnWindowRevealCompleted()
+    internal void OnWindowRevealCompleted()
     {
         if (!_isWindowVisible || _isWindowRevealCompleted)
         {
@@ -254,7 +236,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public void RestoreTransientState(string? inputText, string? searchText)
+    internal void RestoreTransientState(string? inputText, string? searchText)
     {
         ViewModel.InputText = inputText ?? string.Empty;
         ViewModel.SearchText = searchText ?? string.Empty;
@@ -264,7 +246,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    object? IWidgetTransientStateContent.CaptureTransientState()
+    internal object? CaptureSwitchTransientState()
     {
         bool shouldCaptureDetail =
             QuickCaptureDetailRestorePolicy.ShouldCaptureDetail(
@@ -284,7 +266,7 @@ public sealed partial class QuickCaptureSurfaceContent :
             shouldCaptureDetail && !_isDualPane && _showDetailInSinglePane);
     }
 
-    void IWidgetTransientStateContent.RestoreTransientState(object? state)
+    internal void RestoreSwitchTransientState(object? state)
     {
         if (state is QuickCaptureWidgetTransientState quickState)
         {
@@ -396,14 +378,14 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public void BeginInteractiveResize(double contentWidth, double contentHeight)
+    internal void BeginInteractiveResize(double contentWidth, double contentHeight)
     {
         _isInteractiveResizeActive = true;
         CancelSegmentedRestore();
         _deferDetailReaderUntilTransitionCompletes = true;
     }
 
-    public void CompleteInteractiveResize(double contentWidth, double contentHeight)
+    internal void CompleteInteractiveResize(double contentWidth, double contentHeight)
     {
         _isInteractiveResizeActive = false;
         _deferDetailReaderUntilTransitionCompletes = false;
@@ -632,7 +614,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         _settingsService.SaveDebounced();
     }
 
-    public void BeginResponsiveLayoutTransition(
+    internal void BeginResponsiveLayoutTransition(
         double targetContentWidth,
         double targetContentHeight,
         bool isCollapsing)
@@ -708,7 +690,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         });
     }
 
-    public void OnHostViewportSizeChanged(double width, double height)
+    internal void OnHostViewportSizeChanged(double width, double height)
     {
         if (!double.IsFinite(width) || width <= 0)
         {
@@ -723,7 +705,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
     }
 
-    public void CompleteResponsiveLayoutTransition(
+    internal void CompleteResponsiveLayoutTransition(
         double finalContentWidth,
         double finalContentHeight)
     {
@@ -739,7 +721,7 @@ public sealed partial class QuickCaptureSurfaceContent :
         QueueSegmentedRestore();
     }
 
-    public void CancelResponsiveLayoutTransition()
+    internal void CancelResponsiveLayoutTransition()
     {
         _isResponsiveLayoutTransitionActive = false;
         _deferDetailReaderUntilTransitionCompletes = false;
@@ -893,32 +875,6 @@ public sealed partial class QuickCaptureSurfaceContent :
     private async void AddButton_Click(object sender, RoutedEventArgs e)
     {
         await RunAsync(AddInputWithFeedbackAsync);
-        InputTextBox.Focus(FocusState.Programmatic);
-    }
-
-    private async void InputTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        bool controlPressed = Win32Helper.IsKeyPressed(
-            Windows.System.VirtualKey.Control);
-        bool saveShortcut = TextBoxEditorShortcutHelper.IsCtrlSaveShortcut(
-            e.Key,
-            controlPressed,
-            Win32Helper.IsKeyPressed(Windows.System.VirtualKey.Shift));
-        if (e.Key != Windows.System.VirtualKey.Enter && !saveShortcut)
-        {
-            return;
-        }
-
-        e.Handled = true;
-        if (saveShortcut || SettingsService.ShouldSubmitEditorOnEnter(
-                _settingsService.Settings.QuickCaptureEditorEnterBehavior,
-                controlPressed))
-        {
-            await RunAsync(AddInputWithFeedbackAsync);
-            return;
-        }
-
-        TextBoxEditorShortcutHelper.InsertLineBreak(InputTextBox);
     }
 
     private void SearchTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -1560,10 +1516,10 @@ public sealed partial class QuickCaptureSurfaceContent :
                 button.Tag as string,
                 _detailAppearance.ToString(),
                 StringComparison.Ordinal);
+            // A selected swatch ring is a selection state, so it uses the
+            // neutral strong stroke rather than the accent.
             button.BorderBrush = selected
-                ? new SolidColorBrush(
-                    App.Current.ThemeService?.GetEffectiveAccentColor() ??
-                    AccentColorHelper.DefaultAccentColor)
+                ? new SolidColorBrush(NeutralInteractionBrush.Line(button))
                 : new SolidColorBrush(Colors.Transparent);
             button.BorderThickness = new Thickness(selected ? 1.5 : 1);
         }
@@ -1618,20 +1574,19 @@ public sealed partial class QuickCaptureSurfaceContent :
 
         try
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.Desktop
-            };
-            picker.FileTypeFilter.Add("*");
             IntPtr foreground = Win32Helper.GetForegroundWindow();
             IntPtr owner = Win32Helper.GetAncestor(foreground, Win32Helper.GA_ROOT);
-            InitializeWithWindow.Initialize(
-                picker,
-                owner == IntPtr.Zero ? foreground : owner);
-            IReadOnlyList<StorageFile> files = await picker.PickMultipleFilesAsync();
+            IReadOnlyList<string> files =
+                await FileOpenPickerService.PickMultipleFilesAsync(
+                    owner == IntPtr.Zero ? foreground : owner,
+                    [],
+                    PickerLocationId.Desktop);
             DroppedFilePath[] paths = files
-                .Where(file => !string.IsNullOrWhiteSpace(file.Path) && File.Exists(file.Path))
-                .Select(file => new DroppedFilePath(file.Path, file.Name, ForceManagedCopy: false))
+                .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                .Select(path => new DroppedFilePath(
+                    path,
+                    Path.GetFileName(path),
+                    ForceManagedCopy: false))
                 .ToArray();
             if (paths.Length == 0)
             {
@@ -2027,6 +1982,17 @@ public sealed partial class QuickCaptureSurfaceContent :
         };
         flyout.Items.Add(copyItem);
 
+        // Stage 3b, cut point 2 (pluginization): the item -> File-widget
+        // hand-off goes through the IFileWidgetImportTarget port. Quick
+        // Capture owns the plan (item types, file naming, the .url
+        // InternetShortcut format); the port owns target validation, folders
+        // and the write itself. Offered for records and recent drafts alike.
+        flyout.Items.Add(CreateSaveToFileWidgetSubItem(item));
+        if (CreateSaveToLastFileWidgetItem(item) is { } saveToLastFileWidget)
+        {
+            flyout.Items.Add(saveToLastFileWidget);
+        }
+
         if (item.IsRecent)
         {
             var saveItem = CreateContextMenuItem("QuickCapture.SaveToRecords", "\uE74E");
@@ -2107,6 +2073,102 @@ public sealed partial class QuickCaptureSurfaceContent :
             Text = T(textKey),
             Icon = new FontIcon { Glyph = glyph }
         };
+
+    /// <summary>
+    /// "Save to file widget" submenu: one entry per File widget that can take
+    /// an import. Targets come from the port, never from the widget list, so
+    /// a disabled/deleted/mapped-away widget stays out without Quick Capture
+    /// knowing why.
+    /// </summary>
+    private MenuFlyoutSubItem CreateSaveToFileWidgetSubItem(QuickCaptureItemViewModel item)
+    {
+        var subItem = new MenuFlyoutSubItem
+        {
+            Text = T("QuickCapture.SaveToFileWidget"),
+            Icon = new FontIcon { Glyph = "\uE8B7" }
+        };
+
+        var targets = App.Current.FileWidgetImport?.GetImportTargets() ?? [];
+        if (targets.Count == 0)
+        {
+            subItem.Items.Add(new MenuFlyoutItem
+            {
+                Text = T("QuickCapture.NoFileWidgetTargets"),
+                IsEnabled = false
+            });
+            return subItem;
+        }
+
+        foreach (var target in targets)
+        {
+            var targetItem = new MenuFlyoutItem
+            {
+                Text = target.Name,
+                Icon = new FontIcon { Glyph = "\uE8B7" }
+            };
+            targetItem.Click += async (_, _) =>
+                await SaveQuickCaptureItemToFileWidgetAsync(item, target.WidgetId);
+            subItem.Items.Add(targetItem);
+        }
+
+        return subItem;
+    }
+
+    /// <summary>
+    /// One-click repeat of the last import target; null (so the caller adds
+    /// nothing) when no import has happened yet.
+    /// </summary>
+    private MenuFlyoutItem? CreateSaveToLastFileWidgetItem(QuickCaptureItemViewModel item)
+    {
+        if (App.Current.FileWidgetImport?.GetLastImportTarget() is not { } target)
+        {
+            return null;
+        }
+
+        var menuItem = new MenuFlyoutItem
+        {
+            Text = _localizationService.Format("QuickCapture.SaveToLastFileWidget", target.Name),
+            Icon = new FontIcon { Glyph = "\uE8B7" }
+        };
+        menuItem.Click += async (_, _) =>
+            await SaveQuickCaptureItemToFileWidgetAsync(item, target.WidgetId);
+        return menuItem;
+    }
+
+    private async Task SaveQuickCaptureItemToFileWidgetAsync(
+        QuickCaptureItemViewModel item,
+        string targetWidgetId)
+    {
+        if (App.Current.FileWidgetImport is not { } import)
+        {
+            return;
+        }
+
+        QuickCaptureFileImportPlan? plan = QuickCaptureService.BuildFileImportPlan(
+            item.ToModel(),
+            T("QuickCapture.ImageExportFileNamePrefix"),
+            T("QuickCapture.TextFileNamePrefix"),
+            T("QuickCapture.LinkFileNamePrefix"));
+        string? savedPath = plan switch
+        {
+            { SourceFilePath: not null } => await import.TryImportFileAsync(
+                plan.SourceFilePath,
+                targetWidgetId,
+                plan.FileName),
+            { Text: not null } => await import.TryImportTextAsync(
+                plan.Text,
+                plan.FileName,
+                targetWidgetId),
+            _ => null
+        };
+        bool failed = string.IsNullOrWhiteSpace(savedPath);
+        RaiseFeedback(
+            failed
+                ? T("QuickCapture.SaveToFileWidgetFailed")
+                : T("QuickCapture.SavedToFileWidget"),
+            failed ? WidgetFeedbackSeverity.Warning : WidgetFeedbackSeverity.Success,
+            "quick-save-to-file-widget");
+    }
 
     private async void DeleteItemButton_Click(object sender, RoutedEventArgs e)
     {
@@ -2245,9 +2307,10 @@ public sealed partial class QuickCaptureSurfaceContent :
         // fixed-size array before DragItemsCompleted is raised. Item-row drop
         // handlers persist the requested position instead.
         ItemsList.CanReorderItems = false;
-        e.Data.RequestedOperation =
-            DataPackageOperation.Copy |
-            DataPackageOperation.Move;
+        // Export drags are copy-only: advertising Move would let a Win10
+        // Explorer drop physically move the backing attachment file out of
+        // quick-capture storage, and multi-effect offers prompt the picker.
+        e.Data.RequestedOperation = DataPackageOperation.Copy;
     }
 
     private void ItemsList_DragItemsCompleted(
@@ -2269,7 +2332,9 @@ public sealed partial class QuickCaptureSurfaceContent :
         }
 
         e.Handled = true;
-        e.AcceptedOperation = DataPackageOperation.Move;
+        e.AcceptedOperation =
+            DeskBoxDragData.ResolveInternalMetadataOperation(
+                e.AllowedOperations);
         e.DragUIOverride.IsGlyphVisible = true;
     }
 
@@ -2502,7 +2567,9 @@ public sealed partial class QuickCaptureSurfaceContent :
         {
             bool hasFiles = DeskBoxDragData.HasDroppedFiles(e.DataView);
             e.AcceptedOperation = hasFiles
-                ? DeskBoxDragData.GetFileAssociationOperation(e.DataView)
+                ? DeskBoxDragData.GetFileAssociationOperation(
+                    e.DataView,
+                    e.AllowedOperations)
                 : DataPackageOperation.Copy;
             if (hasFiles)
             {
@@ -2592,7 +2659,9 @@ public sealed partial class QuickCaptureSurfaceContent :
 
             bool insertAfter = e.GetPosition(border).Y >= border.ActualHeight / 2;
             e.Handled = true;
-            e.AcceptedOperation = DataPackageOperation.Move;
+            e.AcceptedOperation =
+                DeskBoxDragData.ResolveInternalMetadataOperation(
+                    e.AllowedOperations);
             e.DragUIOverride.IsGlyphVisible = true;
             ApplyQuickCaptureReorderDropState(border, active: true, insertAfter);
             return;
@@ -2605,7 +2674,9 @@ public sealed partial class QuickCaptureSurfaceContent :
 
         e.Handled = true;
         e.AcceptedOperation =
-            DeskBoxDragData.GetFileAssociationOperation(e.DataView);
+            DeskBoxDragData.GetFileAssociationOperation(
+                e.DataView,
+                e.AllowedOperations);
         ApplyFileAssociationDragFeedback(e);
         ApplyQuickCaptureItemDropState(border, active: true);
     }
@@ -2819,10 +2890,10 @@ public sealed partial class QuickCaptureSurfaceContent :
         bool active,
         bool insertAfter)
     {
+        // Insertion position is a drag state, so it draws the neutral
+        // interaction line rather than the accent.
         border.BorderBrush = active
-            ? new SolidColorBrush(
-                App.Current.ThemeService?.GetEffectiveAccentColor() ??
-                AccentColorHelper.DefaultAccentColor)
+            ? new SolidColorBrush(NeutralInteractionBrush.Line(border))
             : new SolidColorBrush(Colors.Transparent);
         border.BorderThickness = active
             ? insertAfter
@@ -2835,27 +2906,27 @@ public sealed partial class QuickCaptureSurfaceContent :
         Border border,
         bool active)
     {
+        // As in the file surface, a drop target reads as the neutral hover
+        // surface: neutral wash plus a neutral border, with no accent and no
+        // hardcoded fallback colour.
         border.Background = active
-            ? ResolveBrush(
-                "SubtleFillColorSecondaryBrush",
-                Color.FromArgb(0x28, 0x78, 0x9E, 0xFF))
+            ? new SolidColorBrush(NeutralInteractionBrush.Fill(border))
             : new SolidColorBrush(Colors.Transparent);
         border.BorderBrush = active
-            ? new SolidColorBrush(
-                App.Current.ThemeService?.GetEffectiveAccentColor() ??
-                AccentColorHelper.DefaultAccentColor)
+            ? new SolidColorBrush(NeutralInteractionBrush.Line(border))
             : new SolidColorBrush(Colors.Transparent);
         border.BorderThickness = new Thickness(active ? 1 : 0);
     }
 
-    private static Brush ResolveBrush(string key, Color fallback)
+    private Brush ResolveBrush(string key, Color fallback)
     {
-        return Application.Current.Resources.TryGetValue(
-                   key,
-                   out object? value) &&
-               value is Brush brush
-            ? brush
-            : new SolidColorBrush(fallback);
+        // A bare Application.Resources lookup resolves theme dictionaries
+        // against the application theme (the system theme captured at
+        // startup), so it kept returning the light card brush after the
+        // widget was overridden to dark — the light veil over the list and
+        // detail surfaces. Resolve by this element's own theme instead.
+        return NeutralInteractionBrush.ResolveThemedResource(key, this) ??
+               new SolidColorBrush(fallback);
     }
 
     private void UpdateSelectedViewVisual()
@@ -2934,14 +3005,23 @@ public sealed partial class QuickCaptureSurfaceContent :
         DependencyObject? itemRoot,
         bool isVisible)
     {
-        if (itemRoot is null ||
-            FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemActionButtons") is not { } actionButtons)
+        if (itemRoot is null)
         {
             return;
         }
 
-        actionButtons.Opacity = isVisible ? 1 : 0;
-        actionButtons.IsHitTestVisible = isVisible;
+        if (FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemActionButtons") is { } actionButtons)
+        {
+            actionButtons.Opacity = isVisible ? 1 : 0;
+            actionButtons.IsHitTestVisible = isVisible;
+        }
+
+        // Same pass also toggles the hover wash so the card itself reacts,
+        // matching the Todo widget's dual hover feedback.
+        if (FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemHoverBackground") is { } hoverBackground)
+        {
+            hoverBackground.Opacity = isVisible ? 1 : 0;
+        }
     }
 
     private static T? FindQuickCaptureVisualChild<T>(DependencyObject parent, string name)
@@ -2992,6 +3072,10 @@ public sealed partial class QuickCaptureSurfaceContent :
 
         ApplyDetailMaterialSurface();
         RefreshItemMaterialSurfaces();
+        // The segmented pointer states copy theme-dependent neutral colors at
+        // apply time, so a light/dark flip must re-apply them (parity with the
+        // standalone window's OnRootElementThemeChanged).
+        ApplySegmentedStyle();
     }
 
     private void RefreshItemMaterialSurfaces()
@@ -3171,10 +3255,6 @@ public sealed partial class QuickCaptureSurfaceContent :
         object? focused = XamlRoot is null
             ? null
             : FocusManager.GetFocusedElement(XamlRoot);
-        if (ReferenceEquals(focused, InputTextBox))
-        {
-            return "Input";
-        }
         if (ReferenceEquals(focused, SearchTextBox))
         {
             return "Search";
@@ -3193,7 +3273,6 @@ public sealed partial class QuickCaptureSurfaceContent :
         _pendingFocusTarget = null;
         FrameworkElement element = target switch
         {
-            "Input" => InputTextBox,
             "Search" => SearchTextBox,
             "Items" => ItemsList,
             _ => ResponsiveContentGrid

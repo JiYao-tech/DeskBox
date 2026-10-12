@@ -179,7 +179,9 @@ public sealed partial class TodoWidgetContent
             bool insertAfter =
                 e.GetPosition(reorderBorder).Y >= reorderBorder.ActualHeight / 2;
             e.Handled = true;
-            e.AcceptedOperation = DataPackageOperation.Move;
+            e.AcceptedOperation =
+                DeskBoxDragData.ResolveInternalMetadataOperation(
+                    e.AllowedOperations);
             e.DragUIOverride.IsGlyphVisible = true;
             ApplyTodoReorderDropState(
                 reorderBorder,
@@ -203,7 +205,9 @@ public sealed partial class TodoWidgetContent
         {
             e.Handled = true;
             e.AcceptedOperation =
-                DeskBoxDragData.GetFileAssociationOperation(e.DataView);
+                DeskBoxDragData.GetFileAssociationOperation(
+                    e.DataView,
+                    e.AllowedOperations);
             ApplyFileAssociationDragFeedback(e);
             SetTodoItemHoverState(sender as DependencyObject, true);
         }
@@ -471,7 +475,9 @@ public sealed partial class TodoWidgetContent
             }
 
             DeskBoxDragData.SetText(e.Data, text, DeskBoxDragData.SourceTodo);
-            e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+            // Export drags are copy-only: advertising Move would let a Win10
+            // Explorer drop move backing files (and still prompts the picker).
+            e.Data.RequestedOperation = DataPackageOperation.Copy;
             e.Data.Properties.Title = App.Current.LocalizationService.Format("Todo.CopiedCount", selectedItems.Count);
             return;
         }
@@ -493,7 +499,7 @@ public sealed partial class TodoWidgetContent
                 e.Data,
                 TodoClipboardFormatter.FormatSingle(draggedItem, App.Current.LocalizationService),
                 DeskBoxDragData.SourceTodo);
-            e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+            e.Data.RequestedOperation = DataPackageOperation.Copy;
         }
         else
         {
@@ -516,7 +522,9 @@ public sealed partial class TodoWidgetContent
         }
 
         e.Handled = true;
-        e.AcceptedOperation = DataPackageOperation.Move;
+        e.AcceptedOperation =
+            DeskBoxDragData.ResolveInternalMetadataOperation(
+                e.AllowedOperations);
         e.DragUIOverride.IsGlyphVisible = true;
         e.DragUIOverride.Caption = App.Current.LocalizationService.T(target switch
         {
@@ -552,7 +560,6 @@ public sealed partial class TodoWidgetContent
                 SelectFilter(target);
                 ShowUndoToast(
                     App.Current.LocalizationService.Format("Todo.DropTab.Applied", changedCount),
-                    durationMs: CopyToastMs,
                     clearUndoOnHide: false);
             }
         }
@@ -584,7 +591,6 @@ public sealed partial class TodoWidgetContent
 
         item.PropertyChanged -= TodoItem_PropertyChanged;
         item.PropertyChanged += TodoItem_PropertyChanged;
-        ApplyTodoItemTooltips(sender, item);
         SetTodoItemHoverState(sender, false);
         if (sender is Border border)
         {
@@ -667,9 +673,10 @@ public sealed partial class TodoWidgetContent
 
         if (active)
         {
+            // Insertion position is a drag state, so it draws the neutral
+            // interaction line rather than the accent.
             border.BorderBrush = new SolidColorBrush(
-                App.Current.ThemeService?.GetEffectiveAccentColor() ??
-                AccentColorHelper.DefaultAccentColor);
+                NeutralInteractionBrush.Line(border));
             border.BorderThickness = insertAfter
                 ? new Thickness(0, 0, 0, 2)
                 : new Thickness(0, 2, 0, 0);
@@ -752,7 +759,9 @@ public sealed partial class TodoWidgetContent
             e.DataView.Contains(StandardDataFormats.WebLink);
         e.AcceptedOperation = supported
             ? DeskBoxDragData.HasDroppedFiles(e.DataView)
-                ? DeskBoxDragData.GetFileAssociationOperation(e.DataView)
+                ? DeskBoxDragData.GetFileAssociationOperation(
+                    e.DataView,
+                    e.AllowedOperations)
                 : DataPackageOperation.Copy
             : DataPackageOperation.None;
         if (DeskBoxDragData.HasDroppedFiles(e.DataView))
@@ -851,7 +860,6 @@ public sealed partial class TodoWidgetContent
                 {
                     ShowUndoToast(
                         App.Current.LocalizationService.T("Todo.Dropped"),
-                        durationMs: CopyToastMs,
                         clearUndoOnHide: false);
                 }
 
@@ -867,7 +875,6 @@ public sealed partial class TodoWidgetContent
             await ViewModel.AddItemAsync(text);
             ShowUndoToast(
                 App.Current.LocalizationService.T("Todo.Dropped"),
-                durationMs: CopyToastMs,
                 clearUndoOnHide: false);
             return true;
         }
@@ -876,7 +883,6 @@ public sealed partial class TodoWidgetContent
             App.Log($"[Todo] Failed to import dropped content: {ex}");
             ShowUndoToast(
                 App.Current.LocalizationService.T("Todo.DropFailed"),
-                durationMs: UndoToastMs,
                 clearUndoOnHide: false);
             return false;
         }
@@ -916,7 +922,6 @@ public sealed partial class TodoWidgetContent
 
             ShowUndoToast(
                 App.Current.LocalizationService.T("Todo.Dropped"),
-                durationMs: CopyToastMs,
                 clearUndoOnHide: false);
             return true;
         }
@@ -925,7 +930,6 @@ public sealed partial class TodoWidgetContent
             App.Log($"[Todo] Failed to import native dropped files: {ex}");
             ShowUndoToast(
                 App.Current.LocalizationService.T("Todo.DropFailed"),
-                durationMs: UndoToastMs,
                 clearUndoOnHide: false);
             return false;
         }

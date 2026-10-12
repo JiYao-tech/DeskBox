@@ -57,14 +57,11 @@ public sealed class QuickRevealLayerContractTests
             "src/DeskBox/Services/WidgetLayerService.cs"));
         string contentWindow = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Views/ContentWidgetWindow.TrayAnimations.cs"));
-        string quickCaptureWindow = File.ReadAllText(TestPaths.FromRepository(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.xaml.cs"));
 
         Assert.Contains("HoldGroupTopMostWithoutActivation", trayAnimation, StringComparison.Ordinal);
         Assert.Contains("holdQuickRevealTopMostDuringHide", manager, StringComparison.Ordinal);
         Assert.Contains("Win32Helper.SetWindowTopMost(handle)", layer, StringComparison.Ordinal);
         Assert.Contains("WidgetLayerService.ClearTopMost(HWnd)", contentWindow, StringComparison.Ordinal);
-        Assert.Contains("WidgetLayerService.ClearTopMost(_hWnd)", quickCaptureWindow, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -73,7 +70,7 @@ public sealed class QuickRevealLayerContractTests
         string bounds = File.ReadAllText(TestPaths.FromRepository(
             "src/DeskBox/Views/WidgetWindowBase.Bounds.cs"));
         string helper = File.ReadAllText(TestPaths.FromRepository(
-            "src/DeskBox/Helpers/Win32Helper.cs"));
+            "src/DeskBox/Platform/Win32Helper.cs"));
 
         Assert.Contains(
             "WidgetLayerService.ShouldPreserveQuickRevealActivatingClick()",

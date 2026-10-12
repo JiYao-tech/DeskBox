@@ -2,6 +2,7 @@
 
 using System.Runtime.InteropServices;
 using DeskBox.Helpers;
+using DeskBox.Platform;
 
 namespace DeskBox.Services;
 
@@ -37,6 +38,10 @@ internal sealed class ReservedHotkeyHookService : IDisposable
     private long _postFailureCount;
     private long _inputFailureCount;
     private long _lifecycleGeneration;
+    private long _lastCallbackTicks;
+    private long _probeCount;
+    private long _probeFailureCount;
+    private long _startMenuLeakCount;
     private ReservedHotkeyMode _mode = ReservedHotkeyMode.WinSpace;
     private bool _disposed;
 
@@ -71,6 +76,65 @@ internal sealed class ReservedHotkeyHookService : IDisposable
     public long TriggerCount => Interlocked.Read(ref _triggerCount);
     public long PostFailureCount => Interlocked.Read(ref _postFailureCount);
     public long InputFailureCount => Interlocked.Read(ref _inputFailureCount);
+    public long ProbeCount => Interlocked.Read(ref _probeCount);
+    public long ProbeFailureCount => Interlocked.Read(ref _probeFailureCount);
+
+    /// <summary>
+    /// Times the WindowsTap trigger fired but the native Start menu won the
+    /// mask race anyway (observed via the delayed foreground check). The
+    /// injected mask itself never reports an error for a lost race, so this
+    /// counter is the only observable trace of feedback 367 (diagnostic
+    /// only; dismissing the menu was rejected as a visible flicker).
+    /// </summary>
+    public long StartMenuLeakCount => Interlocked.Read(ref _startMenuLeakCount);
+
+    internal void RecordStartMenuLeak()
+    {
+        Interlocked.Increment(ref _startMenuLeakCount);
+    }
+
+    /// <summary>
+    /// Environment.TickCount64 of the most recent hook-callback invocation,
+    /// or 0 if the hook has never been called. Windows silently removes
+    /// low-level hooks after repeated delivery timeouts without telling the
+    /// process, so liveness can only be proven by observing a callback.
+    /// </summary>
+    internal long LastCallbackTicks => Volatile.Read(ref _lastCallbackTicks);
+
+    /// <summary>
+    /// Injects a tagged synthetic key press and waits briefly for the hook to
+    /// echo it. True when any callback ran within the window; false means the
+    /// callback path is dead (silently removed or starved) or input could not
+    /// even be injected.
+    /// </summary>
+    internal async Task<bool> ProbeAliveAsync(int echoWaitMilliseconds)
+    {
+        if (!IsActive)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _probeCount);
+        long before = Volatile.Read(ref _lastCallbackTicks);
+        if (!Win32Helper.TrySendTaggedKeyPress(
+                InternalMaskVirtualKey,
+                InjectedEventTag,
+                out int injectError))
+        {
+            Volatile.Write(ref _lastErrorCode, injectError);
+            Interlocked.Increment(ref _probeFailureCount);
+            return false;
+        }
+
+        await Task.Delay(echoWaitMilliseconds).ConfigureAwait(false);
+        if (Volatile.Read(ref _lastCallbackTicks) != before)
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref _probeFailureCount);
+        return false;
+    }
 
     internal static bool IsInternalMaskKey(int virtualKey)
     {
@@ -270,6 +334,12 @@ internal sealed class ReservedHotkeyHookService : IDisposable
         IntPtr installedHook = IntPtr.Zero;
         try
         {
+            // Same rationale as the desktop double-click hook thread: the LL
+            // keyboard callback is delivered as a message here, and a thread
+            // that misses LowLevelHooksTimeout (capped at 1000ms) gets its
+            // hook silently removed. AboveNormal rides out CPU pressure
+            // without touching time-critical scheduling.
+            Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
             lock (_sync)
             {
                 if (_disposed || generation != _lifecycleGeneration)
@@ -362,6 +432,9 @@ internal sealed class ReservedHotkeyHookService : IDisposable
 
     private IntPtr KeyboardHookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
+        // A delivered callback is the only observable proof the hook is still
+        // installed; Windows removes timed-out hooks without notification.
+        Volatile.Write(ref _lastCallbackTicks, Environment.TickCount64);
         IntPtr hookHandle;
         IntPtr notificationWindow;
         uint notificationMessage;
@@ -405,6 +478,27 @@ internal sealed class ReservedHotkeyHookService : IDisposable
         }
         if (disposition == ReservedHotkeyEventDisposition.PassThrough)
         {
+            return Win32Helper.CallNextHookEx(hookHandle, nCode, wParam, lParam);
+        }
+
+        if (disposition == ReservedHotkeyEventDisposition.PrepareMaskAndPassThrough)
+        {
+            // Narrow the Start-menu race (feedback 367): injecting the mask
+            // while the Windows key is still held breaks the isolated-tap
+            // condition before the key-up is ever delivered, so the mask no
+            // longer competes with the key-up in the input stream. Best
+            // effort only — the release-side trigger path re-masks when a
+            // tap completes, and a failed prepare must never block the
+            // pass-through or the trigger.
+            if (!Win32Helper.TrySendTaggedKeyPress(
+                    InternalMaskVirtualKey,
+                    InjectedEventTag,
+                    out int prepareError))
+            {
+                Interlocked.Increment(ref _inputFailureCount);
+                Volatile.Write(ref _lastErrorCode, prepareError);
+            }
+
             return Win32Helper.CallNextHookEx(hookHandle, nCode, wParam, lParam);
         }
 

@@ -1,4 +1,4 @@
-namespace DeskBox.Tests;
+﻿namespace DeskBox.Tests;
 
 public sealed class AotStage4D2ContractTests
 {
@@ -23,12 +23,19 @@ public sealed class AotStage4D2ContractTests
         Assert.Contains("MoveEntriesWithShellProgress(", fileService, StringComparison.Ordinal);
         Assert.Contains("SHFileOperation(ref", fileService, StringComparison.Ordinal);
 
-        string repositoryRoot = TestPaths.FromRepository(".");
-        string[] remainingReferences = TestPaths.EnumerateProductionSourceFiles()
+        string projectDirectory = TestPaths.FromRepository("src/DeskBox");
+        string separator = Path.DirectorySeparatorChar.ToString();
+        string[] remainingReferences = Directory.EnumerateFiles(
+                projectDirectory,
+                "*.cs",
+                SearchOption.AllDirectories)
+            .Where(path =>
+                !path.Contains($"{separator}bin{separator}", StringComparison.OrdinalIgnoreCase) &&
+                !path.Contains($"{separator}obj{separator}", StringComparison.OrdinalIgnoreCase))
             .Where(path => File.ReadAllText(path).Contains(
                 "FileOperationHelper",
                 StringComparison.Ordinal))
-            .Select(path => Path.GetRelativePath(repositoryRoot, path))
+            .Select(path => Path.GetRelativePath(projectDirectory, path))
             .ToArray();
 
         Assert.Empty(remainingReferences);
@@ -39,7 +46,7 @@ public sealed class AotStage4D2ContractTests
     {
         string script = ReadRepositoryFile("scripts/publish-aot-audit.ps1");
 
-        Assert.Contains("$auditProfileVersion = 63", script, StringComparison.Ordinal);
+        Assert.Contains("$auditProfileVersion = 64", script, StringComparison.Ordinal);
         Assert.Contains("schemaVersion = 55", script, StringComparison.Ordinal);
         Assert.Contains("stage4D2RemovedSourceFiles", script, StringComparison.Ordinal);
         Assert.Contains("stage4D2UnexpectedExistingSourceFiles", script, StringComparison.Ordinal);

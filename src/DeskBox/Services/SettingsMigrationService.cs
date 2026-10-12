@@ -1,4 +1,5 @@
 using DeskBox.Models;
+using System.Text.Json;
 
 namespace DeskBox.Services;
 
@@ -20,31 +21,31 @@ public interface ISettingsMigration
 public sealed class SettingsMigrationPipeline
 {
     /// <summary>The current schema version that the application expects.</summary>
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 13;
 
     private readonly List<ISettingsMigration> _migrations = [];
 
     public SettingsMigrationPipeline()
-        : this(
-        [
-            new Migration_0_To_1(),
-            new Migration_1_To_2(),
-            new Migration_2_To_3(),
-            new Migration_3_To_4(),
-            new Migration_4_To_5(),
-            new Migration_5_To_6(),
-            new Migration_6_To_7(),
-            new Migration_7_To_8(),
-            new Migration_8_To_9(),
-            new Migration_9_To_10()
-        ])
     {
+        // Register migrations in order
+        _migrations.Add(new Migration_0_To_1());
+        _migrations.Add(new Migration_1_To_2());
+        _migrations.Add(new Migration_2_To_3());
+        _migrations.Add(new Migration_3_To_4());
+        _migrations.Add(new Migration_4_To_5());
+        _migrations.Add(new Migration_5_To_6());
+        _migrations.Add(new Migration_6_To_7());
+        _migrations.Add(new Migration_7_To_8());
+        _migrations.Add(new Migration_8_To_9());
+        _migrations.Add(new Migration_9_To_10());
+        _migrations.Add(new Migration_10_To_11());
+        _migrations.Add(new Migration_11_To_12());
+        _migrations.Add(new Migration_12_To_13());
     }
 
     /// <summary>
-    /// Test seam: runs an explicit migration list against isolated state so
-    /// pipeline semantics (stop-on-failure, version bookkeeping) can be
-    /// verified without touching the production data root.
+    /// Test seam for fault-injection: the chain behavior (step failures,
+    /// checkpoints, ordering) is what the tests pin, not the real steps.
     /// </summary>
     internal SettingsMigrationPipeline(IEnumerable<ISettingsMigration> migrations)
     {
@@ -53,89 +54,125 @@ public sealed class SettingsMigrationPipeline
 
     /// <summary>
     /// Runs all necessary migrations to bring the settings from their current
-    /// schema version up to <see cref="CurrentSchemaVersion"/>. Migrations
-    /// advance one exact step at a time; a migration that throws OR a gap in
-    /// the registered steps (a step removed/never added) stops the pipeline:
-    /// the schema version stays at the last successful step (never stamped
-    /// past a failed or missing step) so the failed migration is retried on
-    /// the next launch and the registry gap is visible in the log instead of
-    /// silently skipping a step. Migrations that write external stores
-    /// (Migration_9_To_10 creating data/music/settings.json) depend on this.
-    /// Returns true if any migration was applied.
+    /// schema version up to <see cref="CurrentSchemaVersion"/>. Runs
+    /// copy-on-write: every step executes on a deserialized copy of the last
+    /// committed state and a failed step is discarded wholesale, so the
+    /// returned graph is either fully migrated through its recorded
+    /// checkpoint or byte-for-byte the input. The caller replaces its
+    /// settings reference with the returned one.
     /// </summary>
-    public bool RunMigrations(AppSettings settings)
+    public (AppSettings Settings, bool AnyApplied) RunMigrationsOnCopy(AppSettings settings)
     {
         if (settings.SchemaVersion >= CurrentSchemaVersion)
         {
-            return false;
+            return (settings, false);
         }
 
-        bool anyApplied = false;
+        AppSettings working = settings;
         int version = settings.SchemaVersion;
+        bool anyApplied = false;
 
         foreach (var migration in _migrations.OrderBy(m => m.FromVersion))
         {
-            if (version >= CurrentSchemaVersion)
+            if (migration.FromVersion != version)
+            {
+                continue;
+            }
+
+            if (migration.FromVersion >= CurrentSchemaVersion)
             {
                 break;
             }
 
-            if (migration.FromVersion < version)
+            byte[]? snapshot = TrySerializeSettings(working);
+            if (snapshot is null)
             {
-                // Applied on an earlier launch; skip.
-                continue;
+                App.Log(
+                    $"[SettingsMigration] Migration from version {migration.FromVersion} skipped: " +
+                    "the pre-step settings snapshot could not be taken.");
+                break;
             }
 
-            if (migration.FromVersion > version)
+            if (TryDeserializeSettings(snapshot) is not { } stepCopy)
             {
-                // Registry gap: a step is missing (removed or never added).
-                // The old >= comparison would have run later steps here,
-                // silently skipping the missing one. Stop exactly like a
-                // failing migration - the version stays put and the
-                // misconfigured registry becomes visible in the log.
                 App.Log(
-                    $"[SettingsMigration] Migration registry GAP at version {version}: " +
-                    $"the next registered step starts at {migration.FromVersion}. " +
-                    "Stopping so no migration is silently skipped.");
-                settings.SchemaVersion = version;
-                return anyApplied;
+                    $"[SettingsMigration] Migration from version {migration.FromVersion} skipped: " +
+                    "the pre-step settings snapshot could not be read back.");
+                break;
             }
 
             try
             {
-                migration.Migrate(settings);
+                migration.Migrate(stepCopy);
             }
             catch (Exception ex)
             {
+                // A failed step must stop the chain and leave the graph
+                // untouched: every later migration assumes the schema the
+                // failed step was supposed to produce, and the discarded copy
+                // carries no half-applied mutations.
                 App.Log(
-                    $"[SettingsMigration] Migration from version {migration.FromVersion} FAILED " +
-                    $"and will retry on next launch: {ex.Message}");
-                settings.SchemaVersion = version;
-                return anyApplied;
+                    $"[SettingsMigration] Migration from version {migration.FromVersion} failed: {ex.Message}; " +
+                    $"state untouched, stopping at schema version {version} (will retry on next launch)");
+                break;
             }
 
+            working = stepCopy;
             version = migration.FromVersion + 1;
             anyApplied = true;
             App.Log($"[SettingsMigration] Applied migration from version {migration.FromVersion} to {version}");
         }
 
-        // Tail gap: the registry ran out of steps before reaching Current.
-        // Stamping the current version anyway would mark migrations that
-        // were never registered as applied (the mirror image of the mid-
-        // registry gap caught above). Keep the version at the last
-        // successful step so the misconfiguration is visible in the log.
+        // Record the checkpoint the chain actually reached. A partial run
+        // keeps the last successful version so the failed step retries next
+        // launch; only a full pass reaches CurrentSchemaVersion.
         if (version != CurrentSchemaVersion)
         {
+            // Pluginization kept the fork's registry-gap diagnostic: a chain
+            // that stops short of CurrentSchemaVersion is either a failed step
+            // (logged above) or a step that was removed/never registered. The
+            // checkpoint below already stays at the last successful step, so
+            // the missing work is retried next launch — this line makes the
+            // misconfiguration visible in the log instead of silent.
             App.Log(
-                $"[SettingsMigration] Migration registry TAIL GAP: reached version {version} " +
-                $"but the current schema version is {CurrentSchemaVersion}. " +
-                "Stopping so unregistered steps are never marked as applied.");
-            settings.SchemaVersion = version;
-            return anyApplied;
+                $"[SettingsMigration] Migration chain stopped at version {version} " +
+                $"instead of {CurrentSchemaVersion}: a step failed, or the migration " +
+                "registry is missing a step. The checkpoint stays put so the step is " +
+                "retried on the next launch.");
         }
 
-        settings.SchemaVersion = CurrentSchemaVersion;
-        return anyApplied;
+        working.SchemaVersion = version;
+        return (working, anyApplied);
+    }
+
+    private static byte[]? TrySerializeSettings(AppSettings settings)
+    {
+        try
+        {
+            return JsonSerializer.SerializeToUtf8Bytes(
+                settings,
+                SettingsJsonContext.Default.AppSettings);
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[SettingsMigration] Settings snapshot failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static AppSettings? TryDeserializeSettings(byte[] snapshot)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize(
+                snapshot,
+                SettingsJsonContext.Default.AppSettings);
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[SettingsMigration] Settings snapshot read-back failed: {ex.Message}");
+            return null;
+        }
     }
 }
 
@@ -326,6 +363,380 @@ internal sealed class Migration_8_To_9 : ISettingsMigration
     }
 }
 
+/// <summary>
+/// Schema v10 adds the global widget background fields (mode, unified and
+/// panorama image names, dim, unified fit). All of them are nullable with
+/// "follow material" defaults, so an existing profile loads correctly
+/// without data movement.
+///
+/// Pluginization carried the Music feature's settings into its own per-kind
+/// store, so this step also seeds data/music/settings.json from the three
+/// legacy AppSettings fields (MusicUseArtworkBackdrop,
+/// MusicEnableCoverHoverMotion, MusicDisplayMode). The legacy fields stay as
+/// an inert compatibility mirror until the N+2 cleanup release removes them.
+/// Both effects share v10 because both lines shipped them as the v10 step;
+/// splitting them would renumber the upstream chain for no behavioural gain.
+/// </summary>
+internal sealed class Migration_9_To_10 : ISettingsMigration
+{
+    public int FromVersion => 9;
+
+    public void Migrate(AppSettings settings) =>
+        Migrate(settings, DeskBoxDataPathService.Current.DataDirectory);
+
+    internal static void Migrate(AppSettings settings, string dataDirectory)
+    {
+        string musicDataDirectory = Path.Combine(dataDirectory, "music");
+        string storePath = Path.Combine(musicDataDirectory, "settings.json");
+        if (File.Exists(storePath))
+        {
+            return;
+        }
+
+        var store = new MusicSettingsStore(musicDataDirectory);
+        var migrated = store.Load();
+        migrated.UseArtworkBackdrop = settings.MusicUseArtworkBackdrop;
+        migrated.EnableCoverHoverMotion = settings.MusicEnableCoverHoverMotion;
+        migrated.DisplayMode = SettingsService.NormalizeMusicDisplayMode(settings.MusicDisplayMode);
+        // Synchronous write that THROWS on failure: a swallowed write error
+        // here would let the pipeline stamp SchemaVersion=10 while the store
+        // was never created, permanently stranding the legacy values. It
+        // must also never block on an async continuation (UI-thread startup
+        // deadlock), hence the synchronous save path.
+        store.SaveSynchronously(migrated);
+    }
+}
+
+/// <summary>
+/// Schema v11 adds the dual-layer text shadow switch (default off, so
+/// existing profiles load correctly without data movement).
+/// </summary>
+internal sealed class Migration_10_To_11 : ISettingsMigration
+{
+    public int FromVersion => 10;
+
+    public void Migrate(AppSettings settings)
+    {
+    }
+}
+
+/// <summary>
+/// Schema v12 introduces the screen-home model (spec 7.1): infers a home
+/// display for every surface, stamps profile entries with authority, syncs
+/// capsule monitor fields to their surfaces, and derives the new-widget
+/// placement target from the legacy default-screen setting. Pure data — no
+/// Win32/display access.
+/// </summary>
+internal sealed class Migration_11_To_12 : ISettingsMigration
+{
+    public int FromVersion => 11;
+
+    public void Migrate(AppSettings settings)
+    {
+        settings.WidgetGroups ??= [];
+        settings.WidgetTopologyLayouts ??= [];
+
+        // 1. Infer homes: standalone widgets and group surfaces first, then
+        // mirror into group members.
+        foreach (WidgetConfig widget in settings.Widgets)
+        {
+            if (widget.ScreenBindingMode == WidgetScreenBindingMode.FollowPrimary)
+            {
+                continue;
+            }
+
+            if (widget.ScreenBindingMode == WidgetScreenBindingMode.Pinned &&
+                !IsDegenerateId(widget.BoundScreenId))
+            {
+                continue;
+            }
+
+            string? inferred = InferHomeFromProfiles(settings, widget.Id) ??
+                NonDegenerateId(widget.PositionMonitorStableId);
+            if (inferred is not null)
+            {
+                widget.ScreenBindingMode = WidgetScreenBindingMode.Pinned;
+                widget.BoundScreenId = inferred;
+            }
+            else
+            {
+                widget.ScreenBindingMode = WidgetScreenBindingMode.Unbound;
+                widget.BoundScreenId = null;
+            }
+        }
+
+        foreach (WidgetGroupConfig group in settings.WidgetGroups)
+        {
+            if (group.ScreenBindingMode == WidgetScreenBindingMode.Pinned &&
+                !IsDegenerateId(group.BoundScreenId))
+            {
+                continue;
+            }
+
+            // Group profile entries are keyed by the group surface id, not
+            // member ids — try both, surface id first.
+            string? inferred = InferHomeFromProfiles(settings, group.SurfaceId) ??
+                (group.MemberIds.FirstOrDefault() is { } representativeId
+                    ? InferHomeFromProfiles(settings, representativeId)
+                    : null);
+            if (inferred is not null)
+            {
+                group.ScreenBindingMode = WidgetScreenBindingMode.Pinned;
+                group.BoundScreenId = inferred;
+            }
+        }
+
+        foreach (WidgetGroupConfig group in settings.WidgetGroups)
+        {
+            foreach (string memberId in group.MemberIds)
+            {
+                if (settings.Widgets.FirstOrDefault(widget =>
+                        string.Equals(widget.Id, memberId, StringComparison.Ordinal)) is { } member)
+                {
+                    member.ScreenBindingMode = group.ScreenBindingMode;
+                    member.BoundScreenId = group.BoundScreenId;
+                }
+            }
+        }
+
+        // FollowPrimary surfaces never keep a stale bound id.
+        foreach (WidgetConfig widget in settings.Widgets)
+        {
+            if (widget.ScreenBindingMode == WidgetScreenBindingMode.FollowPrimary)
+            {
+                widget.BoundScreenId = null;
+            }
+        }
+
+        // 2. Profile entry authority + 3. capsule field sync.
+        foreach (WidgetTopologyLayoutProfile profile in settings.WidgetTopologyLayouts.Values)
+        {
+            foreach ((string surfaceId, WidgetSurfaceLayoutProfile entry) in profile.Surfaces)
+            {
+                string? home = HomeOfSurface(settings, surfaceId);
+                entry.IsAuthoritative = entry.IsAuthoritative == true ||
+                    (home is not null &&
+                     string.Equals(
+                         NonDegenerateId(entry.PositionMonitorStableId),
+                         home,
+                         StringComparison.OrdinalIgnoreCase));
+                entry.AuthoredAtUtc ??= profile.LastUsedAtUtc;
+
+                // Binding intent is topology-independent and profile switches
+                // must carry it verbatim: mirror the home inferred in step 1
+                // into the entry so the first topology projection after
+                // upgrade does not fall back to heuristics (an entry pin
+                // outranks every heuristic in SelectTargetMonitor).
+                if (home is not null)
+                {
+                    entry.ScreenBindingMode = WidgetScreenBindingMode.Pinned;
+                    entry.BoundScreenId = home;
+                }
+
+                if (entry.CompactPlacement is { } compact)
+                {
+                    compact.PositionMonitorKey = entry.PositionMonitorKey;
+                    compact.PositionMonitorDeviceName = entry.PositionMonitorDeviceName;
+                    compact.PositionMonitorStableId = entry.PositionMonitorStableId;
+                    compact.PositionMonitorWasPrimary = entry.PositionMonitorWasPrimary;
+                }
+            }
+        }
+
+        foreach (WidgetConfig widget in settings.Widgets)
+        {
+            if (widget.CompactPlacement is { } compact)
+            {
+                compact.PositionMonitorKey = widget.PositionMonitorKey;
+                compact.PositionMonitorDeviceName = widget.PositionMonitorDeviceName;
+                compact.PositionMonitorStableId = widget.PositionMonitorStableId;
+                compact.PositionMonitorWasPrimary = widget.PositionMonitorWasPrimary;
+            }
+        }
+
+        // 4. New-widget placement target derives from the legacy default
+        // screen setting; 5. disconnect behavior keeps its default.
+        settings.WidgetNewPlacementTarget = string.IsNullOrWhiteSpace(
+            settings.WidgetDefaultBoundScreenId)
+            ? SettingsService.WidgetNewPlacementCursorDisplay
+            : SettingsService.WidgetNewPlacementSpecificDisplay;
+    }
+
+    private static string? HomeOfSurface(AppSettings settings, string surfaceId)
+    {
+        foreach (WidgetConfig widget in settings.Widgets)
+        {
+            if (string.Equals(widget.Id, surfaceId, StringComparison.Ordinal) &&
+                widget.ScreenBindingMode == WidgetScreenBindingMode.Pinned)
+            {
+                return NonDegenerateId(widget.BoundScreenId);
+            }
+        }
+
+        foreach (WidgetGroupConfig group in settings.WidgetGroups)
+        {
+            if (group.ScreenBindingMode == WidgetScreenBindingMode.Pinned &&
+                string.Equals(group.SurfaceId, surfaceId, StringComparison.Ordinal))
+            {
+                return NonDegenerateId(group.BoundScreenId);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The home for an Unbound surface: its entry in the profile with the
+    /// most monitors (positions captured with the fullest display set are
+    /// the most likely to be user-chosen), falling back to its config
+    /// identity field.
+    /// </summary>
+    private static string? InferHomeFromProfiles(AppSettings settings, string surfaceId)
+    {
+        WidgetSurfaceLayoutProfile? best = null;
+        int bestMonitorCount = -1;
+        DateTimeOffset bestUsedAt = DateTimeOffset.MinValue;
+        foreach (WidgetTopologyLayoutProfile profile in settings.WidgetTopologyLayouts.Values)
+        {
+            if (!profile.Surfaces.TryGetValue(surfaceId, out WidgetSurfaceLayoutProfile? entry) ||
+                entry is null)
+            {
+                continue;
+            }
+
+            int monitorCount = profile.Monitors?.Count ?? 0;
+            if (monitorCount > bestMonitorCount ||
+                (monitorCount == bestMonitorCount && profile.LastUsedAtUtc > bestUsedAt))
+            {
+                bestMonitorCount = monitorCount;
+                bestUsedAt = profile.LastUsedAtUtc;
+                best = entry;
+            }
+        }
+
+        return NonDegenerateId(best?.PositionMonitorStableId);
+    }
+
+    private static bool IsDegenerateId(string? stableId) =>
+        string.IsNullOrWhiteSpace(stableId) ||
+        stableId.Trim().Equals("unknown-display", StringComparison.OrdinalIgnoreCase) ||
+        stableId.Trim().StartsWith(@"\\.\DISPLAY", StringComparison.OrdinalIgnoreCase);
+
+    private static string? NonDegenerateId(string? stableId) =>
+        IsDegenerateId(stableId) ? null : stableId!.Trim();
+}
+
+/// <summary>
+/// Schema v13 rewrites topology profile keys to v4 (display identity set
+/// only, spec 7.2): each stored profile's key is recomputed from its
+/// persisted Monitors; profiles collapsing onto the same v4 key merge
+/// (newest LastUsedAtUtc wins, ties broken by v3 key ordinal; missing
+/// surfaces filled from sibling profiles' newest authoritative entries).
+/// Profiles with empty or all-degenerate Monitors are dropped — their v4
+/// key would collide (the empty set).
+/// </summary>
+internal sealed class Migration_12_To_13 : ISettingsMigration
+{
+    public int FromVersion => 12;
+
+    public void Migrate(AppSettings settings)
+    {
+        if (settings.WidgetTopologyLayouts.Count == 0)
+        {
+            return;
+        }
+
+        var merged = new Dictionary<string, WidgetTopologyLayoutProfile>(StringComparer.Ordinal);
+        foreach ((string key, WidgetTopologyLayoutProfile? profile) in
+                 settings.WidgetTopologyLayouts.Where(pair => pair.Value is not null)
+                     .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (profile!.Monitors is not { Count: > 0 })
+            {
+                continue;
+            }
+
+            string v4Key = ComputeV4Key(profile.Monitors);
+            if (!merged.TryGetValue(v4Key, out WidgetTopologyLayoutProfile? target))
+            {
+                profile.Monitors = profile.Monitors.ToList();
+                merged[v4Key] = profile;
+                continue;
+            }
+
+            // Same identity set: keep the newest usage as the base, merge
+            // missing surfaces from the sibling's authoritative entries.
+            WidgetTopologyLayoutProfile older;
+            if (profile.LastUsedAtUtc <= target.LastUsedAtUtc)
+            {
+                older = profile;
+            }
+            else
+            {
+                // Incoming profile is newer: it becomes the base and must
+                // receive the previous base's unique surfaces — reassign
+                // target, otherwise the merge loop below would compare the
+                // old base against itself and silently drop those entries.
+                older = target;
+                merged[v4Key] = profile;
+                target = profile;
+            }
+            foreach ((string surfaceId, WidgetSurfaceLayoutProfile? siblingEntry) in older.Surfaces)
+            {
+                if (!target.Surfaces.ContainsKey(surfaceId) && siblingEntry is not null)
+                {
+                    target.Surfaces[surfaceId] = siblingEntry;
+                }
+            }
+
+            target.Monitors = target.Monitors.Count >= older.Monitors.Count
+                ? target.Monitors
+                : older.Monitors.ToList();
+        }
+
+        string? activeKey = settings.ActiveWidgetTopologyKey;
+        string? remappedActiveKey = null;
+        if (activeKey is not null &&
+            settings.WidgetTopologyLayouts.TryGetValue(activeKey, out WidgetTopologyLayoutProfile? activeProfile) &&
+            activeProfile is not null &&
+            activeProfile.Monitors is { Count: > 0 })
+        {
+            remappedActiveKey = ComputeV4Key(activeProfile.Monitors);
+        }
+
+        settings.WidgetTopologyLayouts = merged;
+        settings.ActiveWidgetTopologyKey =
+            remappedActiveKey is not null && merged.ContainsKey(remappedActiveKey)
+                ? remappedActiveKey
+                : null;
+    }
+
+    private static string ComputeV4Key(IReadOnlyList<WidgetTopologyMonitorProfile> monitors)
+    {
+        IEnumerable<string> tokens = monitors
+            .Select(monitor => MonitorToken(monitor))
+            .OrderBy(token => token, StringComparer.Ordinal);
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(string.Join("|", tokens)));
+        return "v4-" + Convert.ToHexString(hash.AsSpan(0, 12));
+    }
+
+    private static string MonitorToken(WidgetTopologyMonitorProfile monitor)
+    {
+        string? stableId = string.IsNullOrWhiteSpace(monitor.StableId)
+            ? null
+            : monitor.StableId.Trim();
+        if (stableId is null ||
+            stableId.Equals("unknown-display", StringComparison.OrdinalIgnoreCase) ||
+            stableId.StartsWith(@"\\.\DISPLAY", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"geo:{Math.Max(1, monitor.MonitorWidth)}x{Math.Max(1, monitor.MonitorHeight)}";
+        }
+
+        return stableId.ToUpperInvariant();
+    }
+}
+
 internal sealed class Migration_7_To_8 : ISettingsMigration
 {
     public int FromVersion => 7;
@@ -365,43 +776,3 @@ internal sealed class Migration_7_To_8 : ISettingsMigration
                 settings.TransientWindowReleaseDelaySeconds);
     }
 }
-
-/// <summary>
-/// Copies the three Music feature fields out of the global AppSettings into
-/// the per-kind MusicSettingsStore (pluginization roadmap stage 2, the
-/// per-kind store pilot). Copy-style: the AppSettings fields are left in
-/// place as an inert compatibility source until the N+2 cleanup release
-/// removes them, so a downgrade within the window keeps working. The store
-/// is created only when it does not exist yet - re-running the migration
-/// never overwrites user changes made after the first cutover.
-/// </summary>
-internal sealed class Migration_9_To_10 : ISettingsMigration
-{
-    public int FromVersion => 9;
-
-    public void Migrate(AppSettings settings) =>
-        Migrate(settings, DeskBoxDataPathService.Current.DataDirectory);
-
-    internal static void Migrate(AppSettings settings, string dataDirectory)
-    {
-        string musicDataDirectory = Path.Combine(dataDirectory, "music");
-        string storePath = Path.Combine(musicDataDirectory, "settings.json");
-        if (File.Exists(storePath))
-        {
-            return;
-        }
-
-        var store = new MusicSettingsStore(musicDataDirectory);
-        var migrated = store.Load();
-        migrated.UseArtworkBackdrop = settings.MusicUseArtworkBackdrop;
-        migrated.EnableCoverHoverMotion = settings.MusicEnableCoverHoverMotion;
-        migrated.DisplayMode = SettingsService.NormalizeMusicDisplayMode(settings.MusicDisplayMode);
-        // Synchronous write that THROWS on failure: a swallowed write error
-        // here would let the pipeline stamp SchemaVersion=10 while the store
-        // was never created, permanently stranding the legacy values. It
-        // must also never block on an async continuation (UI-thread startup
-        // deadlock), hence the synchronous save path.
-        store.SaveSynchronously(migrated);
-    }
-}
-

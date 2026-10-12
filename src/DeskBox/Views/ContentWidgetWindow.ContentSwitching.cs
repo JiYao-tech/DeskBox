@@ -1,5 +1,6 @@
 using DeskBox.Contracts;
 using DeskBox.Controls;
+using DeskBox.Controls.WidgetContents;
 using DeskBox.Models;
 using DeskBox.Services;
 
@@ -10,6 +11,9 @@ public sealed partial class ContentWidgetWindow
     internal int LiveMemberCount => _contentHost.LiveContentCount;
 
     internal int CachedGroupContentCount => _cachedGroupContents.Count;
+
+    internal IEnumerable<WidgetKind> CachedGroupContentKinds =>
+        _cachedGroupContents.Values.Select(content => content.WidgetKind);
 
     internal bool HasPresentableContentFrame =>
         ContentWidgetShell.HasPresentableContentFrame;
@@ -77,9 +81,15 @@ public sealed partial class ContentWidgetWindow
         _descriptor = descriptor;
         Diagnostics.SetWidgetContext(config);
         _titleViewModel.SetConfig(config);
-        ContentWidgetShell.TitleGlyph = descriptor.DefaultGlyph;
-        ContentWidgetShell.TitleIconKind =
-            WidgetTitleIconKindNames.FromWidgetKind(config.WidgetKind);
+        ApplyTitleIdentity(config, descriptor, content);
+        // Paint the Glance yield gate from the incoming member's config
+        // before the view's Loaded pass — a cached Glance view carries the
+        // previous member's flag and would draw one stale frame otherwise.
+        if (content.View is DeskBox.Controls.WidgetContents.GlanceWidgetContent glanceView)
+        {
+            glanceView.SetShellCustomBackgroundActive(
+                WidgetBackgroundCustomization.HasCustomBackground(config));
+        }
         AttachCompactPresentationSource(content);
         AttachFeedbackSource(content);
         AttachHostContextMenuSource(content);
@@ -92,6 +102,26 @@ public sealed partial class ContentWidgetWindow
             animateGroupIdentity,
             origin,
             forward);
+    }
+
+    private void ApplyTitleIdentity(
+        WidgetConfig config,
+        WidgetContentDescriptor descriptor,
+        IWidgetContent? content)
+    {
+        // File widgets own their managed/mapped identity in the view model so
+        // runtime remapping and group switches stay consistent; every other
+        // kind keeps the descriptor defaults.
+        if (content is FileWidgetContentAdapter fileSurface)
+        {
+            ContentWidgetShell.TitleGlyph = fileSurface.ViewModel.IconGlyph;
+            ContentWidgetShell.TitleIconKind = fileSurface.ViewModel.TitleIconKind;
+            return;
+        }
+
+        ContentWidgetShell.TitleGlyph = descriptor.DefaultGlyph;
+        ContentWidgetShell.TitleIconKind =
+            WidgetTitleIconKindNames.FromWidgetKind(config.WidgetKind);
     }
 
     internal IWidgetContent? TakeCachedGroupContent(string widgetId)
@@ -167,6 +197,9 @@ public sealed partial class ContentWidgetWindow
         // either here turns the next reveal or group switch into a full XAML/data
         // reconstruction, which is more disruptive than the retained memory.
         _contentHost.CurrentContent?.OnWindowLongHidden();
+        // Custom backgrounds follow the same hidden-widget discipline: no
+        // decoded bitmaps stay alive while the window is long-hidden.
+        ReleaseCustomBackgroundSurface();
     }
 
     /// <summary>
@@ -182,6 +215,7 @@ public sealed partial class ContentWidgetWindow
         }
 
         _contentHost.CurrentContent?.OnWindowLongHidden();
+        ReleaseCustomBackgroundSurface();
         int releasedCachedContents = _cachedGroupContents.Count;
         DisposeCachedGroupContents();
         return releasedCachedContents;

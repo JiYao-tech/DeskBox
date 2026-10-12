@@ -1,3 +1,4 @@
+using DeskBox.Platform;
 using System.Runtime.InteropServices;
 
 namespace DeskBox.Helpers;
@@ -12,11 +13,6 @@ internal static class ExplorerShellLaunchService
     private const int ShellWindowClassDesktop = 8;
     private const int ShellWindowFindNeedDispatch = 1;
     private const int ShowNormal = 1;
-
-    [DllImport("ole32.dll")]
-    private static extern int CoAllowSetForegroundWindow(
-        IntPtr unknown,
-        IntPtr reserved);
 #endif
 
     public static bool TryOpen(
@@ -30,6 +26,7 @@ internal static class ExplorerShellLaunchService
             workingDirectory,
             verb,
             out error,
+            out _,
             out _);
     }
 
@@ -40,12 +37,30 @@ internal static class ExplorerShellLaunchService
         out string? error,
         out ExplorerShellLaunchNativeCallResult? nativeResult)
     {
+        return TryOpen(
+            path,
+            workingDirectory,
+            verb,
+            out error,
+            out nativeResult,
+            out _);
+    }
+
+    internal static bool TryOpen(
+        string path,
+        string workingDirectory,
+        string verb,
+        out string? error,
+        out ExplorerShellLaunchNativeCallResult? nativeResult,
+        out int hresult)
+    {
         nativeResult = null;
+        hresult = 0;
         TryGrantExplorerForegroundActivation();
 #if !DESKBOX_NATIVE_AOT
         if (ExplorerShellLaunchBackendPolicy.Current == ExplorerShellLaunchBackendMode.CSharp)
         {
-            return TryOpenCSharp(path, workingDirectory, verb, out error);
+            return TryOpenCSharp(path, workingDirectory, verb, out error, out hresult);
         }
 #endif
 
@@ -54,7 +69,54 @@ internal static class ExplorerShellLaunchService
             workingDirectory,
             verb);
         error = nativeResult.Success ? null : $"{nativeResult.Failure}: {nativeResult.Detail}";
+        hresult = SelectFailureHResult(nativeResult);
         return nativeResult.Success;
+    }
+
+    /// <summary>
+    /// Picks the HRESULT that best represents a failed native launch. The
+    /// aggregate <see cref="ExplorerShellLaunchNativeCallResult.OperationHResult"/>
+    /// is regularly S_OK while one phase carries the real code, so an
+    /// RPC-class phase wins first — that is the signature the launch circuit
+    /// breaker keys on — before any phase that actually ran and failed is
+    /// surfaced.
+    /// </summary>
+    private static int SelectFailureHResult(ExplorerShellLaunchNativeCallResult result)
+    {
+        if (result.Success)
+        {
+            return 0;
+        }
+
+        int[] candidates =
+        {
+            result.OperationHResult,
+            result.ComHResult,
+            result.CreateHResult,
+            result.WindowsHResult,
+            result.DesktopHResult,
+            result.DocumentHResult,
+            result.ApplicationHResult,
+            result.ExecuteHResult
+        };
+
+        foreach (int candidate in candidates)
+        {
+            if (ExplorerLaunchCircuitBreaker.IsRpcClassFailure(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        foreach (int candidate in candidates)
+        {
+            if (candidate < 0 && candidate != ShortcutNativeModule.HResultNotAttempted)
+            {
+                return candidate;
+            }
+        }
+
+        return 0;
     }
 
 #if !DESKBOX_NATIVE_AOT
@@ -62,9 +124,13 @@ internal static class ExplorerShellLaunchService
         string path,
         string workingDirectory,
         string verb,
-        out string? error)
+        out string? error,
+        out int hresult)
     {
         error = null;
+        // Environment problems (no Shell.Application, no desktop window) are
+        // not RPC failures; only the COM exception below can carry one.
+        hresult = 0;
         object? localShell = null;
         object? shellWindows = null;
         object? desktopWindow = null;
@@ -144,11 +210,13 @@ internal static class ExplorerShellLaunchService
         catch (COMException ex)
         {
             error = ex.Message;
+            hresult = ex.HResult;
             return false;
         }
         catch (Exception ex)
         {
             error = ex.Message;
+            hresult = ex.HResult;
             return false;
         }
         finally
@@ -184,7 +252,7 @@ internal static class ExplorerShellLaunchService
         try
         {
             unknown = Marshal.GetIUnknownForObject(explorerHostedShell);
-            int hResult = CoAllowSetForegroundWindow(unknown, IntPtr.Zero);
+            int hResult = Ole32NativeMethods.CoAllowSetForegroundWindow(unknown, IntPtr.Zero);
             if (hResult < 0)
             {
                 App.Log(

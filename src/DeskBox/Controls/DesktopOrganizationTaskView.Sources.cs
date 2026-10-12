@@ -53,17 +53,7 @@ public sealed partial class DesktopOrganizationTaskView
         }
     }
 
-    private IReadOnlyList<DesktopOrganizationFileSnapshot> GetSourceExcludedItems()
-    {
-        if (_hasCompletedExecution && _lastExecutionPlan is not null)
-            return _lastExecutionPlan.ExcludedItems.Where(item =>
-                item.ExclusionReason != DesktopOrganizationExclusionReason.SourceNotSelected).ToList();
-        if (_basePlan is null || _plan is null) return [];
-        return _basePlan.SourceItems.Where(item => !item.IsEligible &&
-            (item.SourceScope == DesktopOrganizationSourceScope.Public ? _plan.IncludePublicDesktop : _plan.IncludePersonalDesktop)).ToList();
-    }
-
-    private string BuildSourceResult(OrganizationHistoryEntry history, DesktopOrganizationSourceScope scope)
+    private string BuildSourceResult(IReadOnlyList<OrganizationHistoryItem> completedItems, DesktopOrganizationSourceScope scope)
     {
         string name = T(scope == DesktopOrganizationSourceScope.Public
             ? "DesktopOrganization.Public.SharedLabel" : "DesktopOrganization.Public.PersonalLabel");
@@ -71,7 +61,7 @@ public sealed partial class DesktopOrganizationTaskView
             ? _lastExecutionPlan?.IncludePublicDesktop == true : _lastExecutionPlan?.IncludePersonalDesktop == true;
         return selected
             ? Format("DesktopOrganization.Public.SourceResult", name,
-                history.Items.Count(item => item.SourceScope == scope),
+                completedItems.Count(item => item.SourceScope == scope),
                 _runtimeRetainedItems.Count(item => item.SourceScope == scope))
             : string.Empty;
     }
